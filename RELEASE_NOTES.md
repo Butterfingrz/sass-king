@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.2.0-pattern-library - draft
+## v0.2.0-pattern-library
 
 This release marks the completion of the initial Phase 3 pattern library for SASS King. The project now has 29 reusable SM120 / SM120a SASS pattern pages, an updated evidence trail, and a clearer path into Phase 4 production-kernel audits.
 
@@ -41,7 +41,7 @@ Not included yet:
 
 ## Reproducible today
 
-The executable part of v0.1 is the controlled CUDA corpus. A reader can compile a kernel, dump NVIDIA SASS with `cuobjdump`, and compare the result with the chapter conclusion.
+The executable part of v0.2 remains the controlled CUDA corpus. A reader can compile a kernel, dump NVIDIA SASS with `cuobjdump`, and compare the result with the chapter conclusion.
 
 Example:
 
