@@ -1,12 +1,24 @@
 # Release Notes
 
-## v0.1.0-research-corpus - draft
+## v0.2.0-pattern-library - draft
 
-This release marks SASS King as a readable research corpus and evidence-backed knowledge base for NVIDIA SASS. It does not ship a standalone tool.
+This release marks the completion of the initial Phase 3 pattern library for SASS King. The project now has 29 reusable SM120 / SM120a SASS pattern pages, an updated evidence trail, and a clearer path into Phase 4 production-kernel audits.
+
+It does not ship a standalone disassembler, assembler, Ghidra plugin, or audit CLI.
+
+## Highlights
+
+- Added the formal Phase 3 pattern library under `patterns/`.
+- Added 29 reusable audit signatures for tensor-core compute, matrix memory, control flow, register/dataflow behavior, arithmetic lowering, scheduling, and warp collectives.
+- Expanded `knowledge/FINDINGS.md` with the Phase 3 pattern evidence and closeout.
+- Updated denvdis integration notes after the SM120 cross-validation pass.
+- Added documentation indexes for `docs/` and `knowledge/encoding/`.
+- Added `production/README.md` as the Phase 4 production-audit entry point.
+- Updated the root README to explain the current repository structure and Phase 4 next step.
 
 ## Scope
 
-Included in the v0.1 boundary:
+Included in the v0.2 boundary:
 
 - controlled CUDA kernel corpus through chapters 01-25;
 - reorganized `corpus/` layout with section indexes;
@@ -15,7 +27,8 @@ Included in the v0.1 boundary:
 - SM120 / SM120a instruction glossary;
 - pilot encoding pages for `LDSM`, `STSM`, `QMMA`, and partial control-code modeling;
 - denvdis integration notes and representative cross-validation results;
-- contribution rules for evidence tagging and dump metadata.
+- contribution rules for evidence tagging and dump metadata;
+- Phase 4 audit entry point under `production/`.
 
 Not included yet:
 
@@ -53,10 +66,3 @@ cuobjdump --dump-sass vector_add > sm_120.sass
 | `knowledge/DENVDIS_INTEGRATION.md` | denvdis validation status and policy. |
 | `patterns/README.md` | Phase 3 pattern index for audit-facing SASS signatures. |
 | `production/README.md` | Phase 4 entry point for upcoming manual production audits. |
-
-## Release checklist
-
-- [ ] Verify local Markdown links.
-- [ ] Confirm the release file set contains only intended project content.
-- [ ] Exclude non-project workflow files from the release.
-- [ ] Tag after the release branch is merged.
