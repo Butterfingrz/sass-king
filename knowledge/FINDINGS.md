@@ -85,9 +85,10 @@ Do not treat denvdis, gpuasm, Nsight Compute, or external papers as replacements
 After the indexes, the file is still organized as:
 
 1. Audit confidence framework.
-2. Chapter-local research log, kernels 01-25.
-3. Cross-chapter summaries and reusable diagnostic workflows.
-4. Production-audit gaps and Phase 3 gates.
+2. Pattern definition and formal Phase 3 pattern entries.
+3. Chapter-local research log, kernels 01-25.
+4. Cross-chapter summaries and reusable diagnostic workflows.
+5. Production-audit gaps and Phase 3 closeout.
 
 ---
 
@@ -114,6 +115,2650 @@ After the indexes, the file is still organized as:
 [RES] GAP-audit-7 is resolved at the methodology level by this framework: audit-level confidence must now be qualified separately from claim-level `[OBS]`, `[INF]`, `[HYP]`, `[RES]`, and `[GAP]` tags.
 
 [GAP] The framework does not replace future production validation. It defines the reporting standard; individual audits still need their own controlled variants, runtime checks, numeric references, and profiles.
+
+## What counts as a pattern
+
+[INF] In SASS King, a pattern is a reusable SASS shape that lets a reader recognize a compiler or kernel structure in a new dump without redoing the full chapter-level analysis from scratch.
+
+[INF] A pattern is not just one mnemonic. It is the smallest instruction sequence, operand relationship, predicate behavior, scoreboard behavior, or control-flow shape that identifies a higher-level structure such as a warp reduction, tensor-core chain, async shared-memory pipeline, matrix-store epilogue, or local-memory spill.
+
+[INF] Every pattern entry includes a `Plain English` section before the SASS signature. That section states what the pattern means in ordinary kernel-engineering terms before the entry moves into opcode-level evidence.
+
+[INF] A pattern must say what can be concluded from the visible SASS and what cannot be concluded without more evidence. Structural presence can reach C1 when the signature is visible in a dump; source-level causality requires C2 controlled variants; runtime, correctness, performance, and cross-context claims require C3 through C6 evidence.
+
+[OBS] Existing chapters already contain candidate patterns: Chapters 09 and 10 contain warp-level collective and reduction forms, Chapter 13 contains chained HMMA forms, Chapters 17 and 18 contain LDSM and async-copy pipeline forms, Chapter 24 contains production-like tensor-core segmentation, and Chapter 25 contains STSM epilogue and storeback forms.
+
+[INF] Phase 3 promotes these repeated chapter-local observations into named entries so production audits can cite `PATTERN-NN` with a confidence level instead of restating the full evidence trail every time.
+
+[RES] The initial Phase 3 pattern set is complete in this findings file: the repeated chapter-local observations have been promoted into named entries with plain-English explanations, SASS signatures, observed variants, anti-patterns, confidence labels, and open gaps.
+
+## Patterns
+
+[INF] This section promotes repeated chapter-local observations into reusable production-audit signatures. [INF] A production audit can cite a `PATTERN-NN` entry when the dump contains the stated SASS signature and the audit preserves the pattern's confidence limits.
+
+### PATTERN-01: Warp reduction
+
+**Category**: collective
+**Evidence**: [OBS] Chapters 09, 10, and 21 contain the supporting observations for this pattern.
+**Confidence**: [INF] C2 for the controlled Chapter 09 and 10 reduction kernels; C1 for static recognition in future production dumps unless a controlled source variant or runtime validation is added.
+
+**Plain English**
+
+[INF] A warp reduction means that the 32 lanes of one warp each start with their own value, then cooperate to produce one result for the whole warp. For example, lane 0 may hold `3`, lane 1 may hold `7`, lane 2 may hold `2`, and the reduction computes one warp-level sum, maximum, minimum, bitwise result, or similar combined value.
+
+[INF] In source-level terms, this is the shape behind operations such as "sum these 32 lane values," "take the maximum across the warp," or "combine one integer flag from each lane." The important idea is that the result belongs to the warp, not to independent per-thread scalar work.
+
+[INF] In SASS, the manual form does the reduction step by step: `SHFL.BFLY` moves values between lanes, then arithmetic instructions combine the exchanged values. The hardware form does the same high-level job with one `REDUX` instruction that writes the combined result into a uniform register.
+
+[INF] The output still has to be used carefully. A `REDUX` result lives in the uniform register file, so per-thread consumers usually need a `MOV R, UR` before a normal per-thread store or arithmetic instruction can use the value.
+
+[INF] When this pattern appears in a production dump, the safe conclusion is that a warp-level reduction structure is present. It does not by itself prove the original source expression, the numeric correctness of the reduction, or the runtime cost without additional evidence.
+
+**SASS signature**
+
+[OBS] The butterfly FP32 reduction form is five `SHFL.BFLY` stages paired with five arithmetic combine instructions over masks `0x10`, `0x08`, `0x04`, `0x02`, and `0x01`; Chapter 09 observes the `SHFL.BFLY` plus `FADD` sequence for the 32-lane warp reduction.
+
+[OBS] The hardware integer reduction form is a single `REDUX` instruction that takes a per-thread `R` input and writes a uniform `UR` output; Chapter 10 observes `REDUX.SUM.S32 UR7, R2` and the other tested `REDUX` variants in the same kernel skeleton.
+
+[OBS] The complete observed REDUX consumer path includes a cross-file transfer when the reduced value is used by per-thread code: Chapter 10 observes `MOV R9, UR7` after `REDUX.SUM.S32 UR7, R2`, before the selected lane stores the value.
+
+[INF] The `MOV R9, UR7` is the REDUX scoreboard consumer in the Chapter 10 scheduling model, because it is the first per-thread use of the uniform REDUX result and its control code shows the wait pattern documented there. [GAP] Full bit-level validation of the REDUX scheduling fields remains pending.
+
+[OBS] A per-warp output path commonly includes the lane-zero predicate idiom `LOP3.LUT P, RZ, R_tid, 0x1f, RZ, 0xc0, !PT`, a predicated exit for non-lane-zero threads, warp-id derivation with `SHF.R.U32.HI`, and one `STG` for the selected lane's result.
+
+[OBS] When a warp-synchronous reduction follows divergent input loading, Chapters 09 and 10 observe identity initialization before the bounds check plus `BSSY.RECONVERGENT` and `BSYNC.RECONVERGENT` before the warp-level reduction operation.
+
+**Variants**
+
+[OBS] Chapter 09 observes the manual FP32 butterfly form: `SHFL.BFLY` plus `FADD` for a warp-wide sum.
+
+[OBS] Chapter 10 observes hardware integer reductions for signed sum, signed min, signed max, unsigned min, unsigned max, bitwise and, bitwise or, and bitwise xor through `REDUX.SUM.S32`, `REDUX.MIN.S32`, `REDUX.MAX.S32`, `REDUX.MIN`, `REDUX.MAX`, plain `REDUX`, `REDUX.OR`, and `REDUX.XOR`.
+
+[OBS] Chapter 10 observes that all tested `REDUX` variants share opcode bytes `0x00000000020773c4`; the operation and signedness are selected by control-code bits rather than by distinct opcode bytes.
+
+[OBS] Chapter 10 observes identity-load variants before the reduction: `HFMA2` for identities representable as packed half constants and `MOV` for identities such as `0x7fffffff` or `0xffffffff`.
+
+[OBS] Chapter 09 observes that `__syncwarp()` itself does not lower to a dedicated `WARPSYNC` instruction in the tested SM120 forms; ptxas emits NOP padding or eliminates redundant calls. Chapter 21 later observes `@P0 WARPSYNC.ALL` before a predicated HMMA, which is supporting warp-level control evidence but not a warp-reduction signature.
+
+[OBS] Chapter 21 observes related warp-level control forms, including `VOTE.ANY R5, PT, P0`, `VOTE.ANY P0, P0`, `SHFL.IDX`, and `@P0 WARPSYNC.ALL`; these are supporting collective-control evidence but are not by themselves the warp-reduction signature.
+
+**Interpretation**
+
+[INF] A five-stage `SHFL.BFLY` plus arithmetic cascade identifies a manual warp reduction because each stage exchanges values across a progressively smaller XOR lane mask and immediately combines the exchanged value into the running accumulator.
+
+[INF] A `REDUX` instruction with `R` input, `UR` output, and a downstream `MOV R, UR` identifies a hardware warp reduction because Chapter 10 controlled variants replace the Chapter 09 butterfly reduction with one uniform-output reduction instruction.
+
+[INF] The lane-zero store path identifies a per-warp result emission strategy, not the reduction operation itself, because the selected lane writes one result per warp after the warp-level value has been produced.
+
+[INF] Identity initialization before a divergent bounds check is part of making all lanes contribute valid values to a warp-synchronous operation. It is supporting context for reductions with guarded loads, not enough to identify the reduction without the SHFL/FADD cascade or REDUX instruction.
+
+**Anti-patterns**
+
+[INF] A single `SHFL.IDX`, `SHFL.UP`, or `SHFL.DOWN` without a repeated combine chain is a warp value-exchange or broadcast pattern, not enough evidence for a warp reduction by itself.
+
+[INF] A `VOTE.ANY`, `VOTE.ALL`, or `MATCH` instruction by itself is a warp collective, not a value reduction, unless the surrounding SASS shows that its output participates in a reduction-like decision or store path.
+
+[INF] A `WARPSYNC.ALL` instruction by itself is a synchronization or guarded warp-level execution marker, not a reduction signature.
+
+**Open gaps**
+
+[GAP] REDUX cycle latency is not measured; Chapter 10 records the instruction-count and stage-count reduction but leaves cycle-accurate latency to a microbenchmark.
+
+[GAP] REDUX unsigned sum is not tested; Chapter 10 leaves the unsigned `__reduce_add_sync` form as a future variant.
+
+[GAP] Full scheduling-bit decoding for REDUX, SHFL, VOTE, and related collective operations remains incomplete; `knowledge/encoding/CONTROL_CODE.md` contains the current partial control-code model.
+
+[GAP] Non-full warp masks and genuine divergence before warp-level collectives remain under-tested; Chapter 09 shows partial `__syncwarp` masks do not change the subsequent SHFL segment encoding, and Chapter 21 leaves non-full masks after real divergence open.
+
+[GAP] Cross-architecture stability is not established for this pattern beyond the checked-in SM120 and SM89 artifacts; Phase 6 replay must test whether the same signatures and suffix conventions hold on SM80, SM86, SM90a, and SM100a.
+
+---
+
+### PATTERN-02: HMMA accumulator chain
+
+**Category**: tensor_core
+**Evidence**: [OBS] Chapter 13 contains the controlled HMMA observations for this pattern; Chapters 17, 18, 20, 21, 22, 24, and 25 contain supporting contexts where `HMMA.16816.F32` appears in load, control-flow, epilogue, and production-like kernels.
+**Confidence**: [INF] C2 for Chapter 13 controlled accumulator-chaining variants; C3 for the Chapter 13 clock64 latency microbenchmark; C1 for static recognition in future production dumps unless source, runtime, or profile evidence is added.
+
+**Plain English**
+
+[INF] An HMMA accumulator chain means that tensor-core matrix multiply instructions are stacked so each instruction adds into the same running accumulator. In source-level terms, this is the SASS shape behind doing several small matrix multiply-accumulate steps for the same output tile.
+
+[INF] The important idea is "keep accumulating here." One HMMA writes an accumulator fragment, and the next HMMA reads that same fragment as its C input, adds another A x B product, and writes the updated accumulator back to the same registers.
+
+[INF] In a GEMM-like kernel, this is the compute spine of the tile: load fragments, run one or more HMMAs, keep the partial sums live in registers, then eventually store or transform the accumulator. Seeing this pattern identifies an FP16/BF16 tensor-core accumulation region, not a complete GEMM by itself.
+
+[INF] When this pattern appears in a production dump, the safe conclusion is that consecutive HMMA instructions are dependency-chained through the accumulator. It does not by itself prove the original loop nest, the number of source-level K iterations, tensor-core throughput, or final numeric correctness without additional evidence.
+
+**SASS signature**
+
+[OBS] The SM120 HMMA form observed in Chapter 13 is `HMMA.16816.<acc_dtype>[.<input_dtype>]`, with `.16816` identifying the m16n8k16 shape, `.F16` or `.F32` identifying accumulator dtype, and `.BF16` appearing only for BF16 input.
+
+[OBS] HMMA is warp-level in the studied SM120 dumps: one visible `HMMA.16816.*` instruction represents the 32 lanes cooperating on one tensor-core tile fragment, not 32 independent scalar instructions.
+
+[OBS] Dense HMMA uses four visible SASS operands in the order D base, A base, B base, C base; the per-thread fragment spans are implicit in the opcode suffix and dtype.
+
+[OBS] The chained form colocates D and C on the same register base. Chapter 13 observes `HMMA R16, R12, R10, R16` in 13d and `HMMA R16, R4, R2, R16` across the 13e latency chain.
+
+[INF] D/C colocation is the in-place accumulator update form for the observed HMMA chain.
+
+[OBS] In the observed chained form, A and B stay on distinct register bases.
+
+[INF] A and B remain distinct from D because later HMMAs re-read those fragments, while D and C can be colocated for the in-place accumulator under the Chapter 13 resolved allocation rule.
+
+[OBS] Chapter 13 observes `.reuse` on the B operand of every HMMA in a chain except the last one: 13d uses `R10.reuse` on the first HMMA and no `.reuse` on the last; 13e uses `R2.reuse` on HMMAs #1-15 and no `.reuse` on HMMA #16.
+
+[OBS] Chapter 13 observes chain-specific control-code transitions: 13e HMMA #1 uses control code `0x084ff60000001810`, HMMAs #2-15 use `0x080ff60000001810`, and HMMA #16 uses `0x000ff00000001810`.
+
+**Variants**
+
+[OBS] Chapter 13 observes a two-HMMA chain in 13d with FP16 input and FP32 accumulator: 2 x `HMMA.16816.F32`, D/C colocated, B `.reuse` on the first HMMA, and output `d[0] = 32.0`.
+
+[OBS] Chapter 13 observes N-HMMA serial chains in 13e for N=16, N=32, and N=64, bracketed by `clock64()` for latency measurement.
+
+[OBS] Chapter 13 observes single-HMMA FP16 accumulator and FP32 accumulator variants as non-chain baselines: 13a emits `HMMA.16816.F16`, 13b emits `HMMA.16816.F32`, and 13c emits `HMMA.16816.F32.BF16`.
+
+[OBS] Chapter 21 observes a predicated guarded HMMA form, `@P0 HMMA.16816.F32`, after `@P0 WARPSYNC.ALL`.
+
+[INF] This is HMMA control-flow evidence, but it is not by itself an accumulator-chain signature.
+
+[OBS] Chapters 22 and 25 observe HMMA feeding STSM epilogue forms; those contexts show accumulator storeback uses but are separate from the chain signature unless consecutive D/C-colocated HMMAs are visible.
+
+**Interpretation**
+
+[INF] Consecutive HMMAs with D and C on the same accumulator register base identify an accumulator dependency chain because the later HMMA reads the earlier HMMA's output as its C operand and writes the updated accumulator back in place.
+
+[INF] `.reuse` on the B operand identifies ptxas preparing for a later HMMA to re-read the same B fragment. The absence of `.reuse` on the last HMMA is consistent with no later HMMA consumer of that B operand in the observed chain.
+
+[INF] The control-code high-bit transition identifies scoreboard-coordinated variable-latency chaining. Chapter 13 resolves HMMA as scoreboard-using and measures the serial dependency-chain latency at approximately 35 cycles per `HMMA.16816.F32` on SM120.
+
+[INF] The 35-cycle number is a dependency-chain latency result, not a throughput result. It applies when each HMMA must wait on the previous HMMA's accumulator output.
+
+[INF] The 2 x `@!UPT UIADD3 URZ` NOP pad after an HMMA is a scheduling fallback when the next consumer depends on the HMMA D result and no useful independent work is available. It is not intrinsic to every HMMA, because Chapter 13 observes zero NOPs after the final HMMA when the next instruction is an independent `CS2R`.
+
+**Anti-patterns**
+
+[INF] A single `HMMA.16816.*` instruction is tensor-core compute evidence, but it is not an accumulator-chain pattern unless a subsequent HMMA reads the previous accumulator through the C operand or the surrounding SASS shows the dependency.
+
+[INF] Consecutive HMMA instructions using different C/D accumulator bases may be independent accumulators scheduled near each other, not a serial accumulator chain.
+
+[INF] HMMA followed by `STG`, `STSM`, or scalar arithmetic is an accumulator consumer path, not an HMMA chain unless a later HMMA reuses the accumulator as C.
+
+[INF] `@P0 HMMA` guarded by `WARPSYNC.ALL` is a predicated tensor-core execution form. It should not be classified as an accumulator chain without the D/C register-base recurrence.
+
+**Open gaps**
+
+[HYP] HMMA latency for FP16 accumulator and BF16 input variants is not measured; Chapter 13 measures the serial latency for `HMMA.16816.F32` only.
+
+[HYP] HMMA throughput in independent, non-chained configurations is not established by the Chapter 13 latency chain; the measured 35 cycles is serial dependency-chain latency, not tensor-core throughput.
+
+[HYP] HMMA shapes other than m16n8k16 are not tested in Chapter 13; the pattern is currently scoped to `HMMA.16816.*` on SM120.
+
+[HYP] The approximately 310-cycle fixed overhead in the Chapter 13 latency model is not decomposed; possible contributors include timer reads, first-HMMA startup, final visibility, and scoreboard setup.
+
+[GAP] The exact scoreboard slot ID used by HMMA is not decoded.
+
+[GAP] Low-order scheduling bits of the HMMA control code remain partially decoded only.
+
+[GAP] NCU validation of the Chapter 13 latency and pipeline-utilization interpretation was not performed.
+
+---
+
+### PATTERN-03: QMMA accumulator chain
+
+**Category**: tensor_core
+**Evidence**: [OBS] Chapter 14 contains the controlled dense QMMA observations for this pattern; Chapters 19, 23, 24, and 25 contain supporting sparse, fragment-layout, production-like, and epilogue contexts where `QMMA` forms appear.
+**Confidence**: [INF] C2 for Chapter 14 controlled accumulator-chaining and dtype variants; C3 for the Chapter 14 clock64 latency microbenchmark; C1 for static recognition in future production dumps unless source, runtime, or profile evidence is added.
+
+**Plain English**
+
+[INF] A QMMA accumulator chain is the low-precision tensor-core version of the same "keep accumulating here" structure documented for HMMA. The kernel repeatedly applies FP8, FP6, or FP4 matrix multiply-accumulate work to the same output fragment.
+
+[INF] In source-level terms, this is the SASS shape behind a low-precision GEMM tile accumulating partial sums across K. Each QMMA reads the current accumulator as C, adds another A x B product, and writes the updated accumulator back to the same registers.
+
+[INF] The main difference from HMMA is the input format space. QMMA names both input dtypes explicitly, such as `E4M3`, `E5M2`, `E3M2`, `E2M3`, or `E2M1`, and those dtype choices are encoded in the control code rather than by changing the base opcode bytes.
+
+[INF] When this pattern appears in a production dump, the safe conclusion is that a dense low-precision tensor-core accumulator chain is present. It does not by itself prove the exact source template, the packed-value correctness for FP4/FP6, tensor-core throughput, or the final numeric result without additional evidence.
+
+**SASS signature**
+
+[OBS] The dense SM120 QMMA form observed in Chapter 14 is `QMMA.16832.<acc>.<inputA>.<inputB>`, with `.16832` identifying m16n8k32 and both input dtypes explicit in the mnemonic.
+
+[OBS] Chapter 14 observes that `kind::f8f6f4` requires `-arch=compute_120a -code=sm_120a`; plain `-arch=sm_120` rejects the feature.
+
+[OBS] The dense QMMA family uses low opcode byte `0x7a` in the tested SM120 dumps, matching the tensor-core family summary.
+
+[OBS] Dense QMMA is warp-level in the studied SM120 dumps: one visible `QMMA.16832.*` instruction represents the 32 lanes cooperating on one tensor-core tile fragment, not 32 independent scalar instructions.
+
+[OBS] Dense QMMA uses four visible SASS operands in the order D base, A base, B base, C base; fragment spans are implicit in the shape and accumulator dtype.
+
+[OBS] Chapter 14 observes opcode bytes invariant across the tested dense input and accumulator dtypes when operand bases are unchanged.
+
+[INF] Dtype selection lives in the control code rather than in a distinct opcode byte sequence, because the tested dtype variants keep opcode bytes stable while their control codes and displayed dtype suffixes change.
+
+[OBS] The observed dense QMMA dtype model uses bits 14, 18, and 19 for operand A and bits 15, 20, and 21 for operand B; Chapter 14 validates the model with the asymmetric 14i prediction for `E4M3 x E2M1`.
+
+[OBS] Chapter 14 observes two chained `QMMA.16832.F32.E4M3.E4M3` instructions in 14e with D and C colocated on the same register base.
+
+[INF] D/C colocation identifies an in-place accumulator update under the same MMA-family allocation rule established by Chapters 13 and 14.
+
+[OBS] Chapter 14 observes `.reuse` on the B operand of every QMMA in a chain except the last one.
+
+[INF] The QMMA `.reuse` placement matches the HMMA chain rule from Chapter 13.
+
+[OBS] Chapter 14 observes chain-specific control-code transitions: chain-start uses a `0x084ff6...` high-byte pattern, mid-chain uses `0x080ff6...`, and the last QMMA uses `0x000ff0...`.
+
+**Variants**
+
+[OBS] Chapter 14 observes dense single-QMMA variants for `E4M3.E4M3`, `E4M3.E5M2`, `E5M2.E5M2`, `E2M1.E2M1`, `E3M2.E3M2`, `E2M3.E2M3`, and mixed `E4M3.E2M1` inputs.
+
+[OBS] Chapter 14 observes accumulator dtype variants: `QMMA.16832.F32...` and `QMMA.16832.F16...`.
+
+[OBS] Chapter 14 observes a two-QMMA dense chain in 14e with D/C colocated, B `.reuse` on the first QMMA, and control code `0x084ff60000002c10` on the first QMMA and `0x000ff60000002c10` on the last.
+
+[OBS] Chapter 14 observes N-QMMA serial chains in 14f for N=16, N=32, and N=64, bracketed by `clock64()` for latency measurement.
+
+[OBS] Chapter 19 observes sparse QMMA chain scheduling in 19m that follows the Chapter 14 dense chain pattern, but sparse `QMMA.SP.16864` adds metadata operands and is supporting evidence rather than the dense `QMMA.16832` signature itself.
+
+[OBS] Chapter 24 observes production-like dense QMMA contexts, including 24h with four chained `QMMA.16832.F32.E4M3.E4M3` instructions.
+
+**Interpretation**
+
+[INF] Consecutive dense QMMAs with D and C on the same accumulator register base identify a low-precision tensor-core accumulator dependency chain because the later QMMA reads the earlier QMMA's output as C and writes the updated accumulator in place.
+
+[INF] The explicit A and B dtype suffixes identify the low-precision element formats used by the tensor-core instruction. The control-code dtype bits let the reader distinguish format changes from operand-register changes.
+
+[INF] The `sm_120a` target requirement is a compile-target constraint for these dense low-precision QMMA forms. It is not itself a runtime pattern, but it explains why an otherwise similar `sm_120` build may not contain this SASS family.
+
+[INF] `.reuse` on B identifies ptxas preparing for a later QMMA to re-read the same B fragment. The absence of `.reuse` on the last observed QMMA is consistent with no later QMMA consumer of that B operand.
+
+[INF] The control-code high-byte transition identifies the same MMA-family scoreboard chaining scheme observed for HMMA. Chapter 14 resolves the dense QMMA serial dependency-chain latency at approximately 35 cycles per `QMMA.16832.F32.E4M3.E4M3` on SM120.
+
+[INF] The 35-cycle number is a dependency-chain latency result, not a throughput result. It applies when each QMMA must wait on the previous QMMA's accumulator output.
+
+[INF] The Chapter 14 result implies higher work per serial-latency slot than HMMA for the tested dense FP8 form, because `QMMA.16832` covers k=32 while `HMMA.16816` covers k=16, but the measured marginal chain latency is approximately the same.
+
+**Anti-patterns**
+
+[INF] A single `QMMA.16832.*` instruction is dense low-precision tensor-core compute evidence, but it is not an accumulator-chain pattern unless a subsequent QMMA reads the previous accumulator through the C operand or the surrounding SASS shows the dependency.
+
+[INF] Consecutive QMMAs using different C/D accumulator bases may be independent accumulators scheduled near each other, not a serial accumulator chain.
+
+[INF] `QMMA.SF`, `QMMA.SP`, and `QMMA.SF.SP` are related QMMA-family forms with additional scale or sparse metadata operands. They should not be collapsed into the dense `QMMA.16832` chain signature without preserving their extra operands and gaps.
+
+[INF] A dense QMMA followed by `STG`, `STSM`, or scalar arithmetic is an accumulator consumer path, not a QMMA chain unless a later QMMA reuses the accumulator as C.
+
+**Open gaps**
+
+[GAP] FP4 E2M1 fragment layout remains decode-unresolved from Chapter 14 and later reduced but not fully closed by Chapter 23; the SASS signature is valid, but productive FP4 value interpretation remains open.
+
+[GAP] FP6 layout and exact lane-to-value mappings remain incomplete for the tested dense QMMA formats.
+
+[HYP] QMMA throughput in independent, non-chained configurations is not established by the Chapter 14 latency chain; the measured 35 cycles is serial dependency-chain latency, not tensor-core throughput.
+
+[HYP] QMMA shapes other than tested dense m16n8k32 are not established by Chapter 14.
+
+[HYP] The approximately 510-cycle fixed overhead in the Chapter 14 latency model is not decomposed; Chapter 14 hypothesizes deeper FP8 pipeline startup or related overhead but does not resolve it.
+
+[GAP] Single-QMMA versus chain-last control-code deltas beyond bits 26 and 27 remain partially decoded only.
+
+[GAP] NCU validation of the Chapter 14 latency and pipeline-utilization interpretation was not performed.
+
+---
+
+### PATTERN-04: OMMA block-scaled FP4 accumulator chain
+
+**Category**: tensor_core
+**Evidence**: [OBS] Chapter 16 contains the controlled dense block-scaled OMMA observations for this pattern; Chapters 19, 23, 24, and 25 contain supporting sparse, scale-vector, production-like, and epilogue contexts where `OMMA.SF` forms appear.
+**Confidence**: [INF] C2 for Chapter 16 controlled block-scaled OMMA variants; C3 for the Chapter 16 clock64 latency microbenchmark; C1 for static recognition in future production dumps unless source, runtime, or profile evidence is added.
+
+**Plain English**
+
+[INF] An OMMA block-scaled FP4 accumulator chain is the Blackwell FP4 peak-path version of the tensor-core accumulator chain. The kernel repeatedly applies FP4 matrix multiply-accumulate work, with explicit scale factors, to the same output fragment.
+
+[INF] In source-level terms, this is the SASS shape behind a block-scaled FP4 GEMM tile accumulating partial sums across K. Each OMMA reads the current accumulator as C, multiplies packed FP4 A and B fragments with scale factors, adds the result, and writes the updated accumulator back to the same registers.
+
+[INF] The important difference from dense QMMA is the scaling channel. OMMA carries scale operands in the SASS instruction, and the mnemonic records scale dtype and scale-vector mode, such as `.E8`, `.UE4M3`, and `.4X`.
+
+[INF] When this pattern appears in a production dump, the safe conclusion is that a dense block-scaled FP4 tensor-core accumulator chain is present. It does not by itself prove packed FP4 value correctness, scale-value semantics beyond the tested forms, tensor-core throughput, or the final numeric result without additional evidence.
+
+**SASS signature**
+
+[OBS] The dense SM120 OMMA forms observed in Chapter 16 include `OMMA.SF.16864.F32.E2M1.E2M1.E8` and `OMMA.SF.16864.F32.E2M1.E2M1.UE4M3.4X`.
+
+[INF] In the observed OMMA mnemonic, `.16864` identifies m16n8k64 and `.SF` identifies scale-factor mode.
+
+[OBS] Chapter 16 observes that the tested `kind::mxf4nvf4` forms emit the block-scaled OMMA path with low opcode byte `0x7f`, distinct from HMMA low byte `0x3c` and QMMA low byte `0x7a`.
+
+[OBS] The tensor-core cross-chapter summary classifies dense OMMA as a warp-level instruction in the studied SM120 dumps.
+
+[INF] One visible `OMMA.SF.16864.*` instruction therefore represents the 32 lanes cooperating on one tensor-core tile fragment, not 32 independent scalar instructions.
+
+[OBS] Dense block-scaled OMMA uses seven visible SASS operands in the observed forms: D base, A base, B base, C base, SFA, SFB, and `URZ` for the bid/tid operand.
+
+[OBS] Chapter 16 observes `OMMA.SF.16864.F32.E2M1.E2M1.E8` for the mxf4nvf4 2X ue8m0 path and `OMMA.SF.16864.F32.E2M1.E2M1.UE4M3.4X` for the mxf4nvf4 4X ue4m3 path.
+
+[OBS] Chapter 16 observes identical opcode bytes between the 2X ue8m0 and 4X ue4m3 dense OMMA variants when operand bases are unchanged.
+
+[INF] Scale mode selection lives in the control code rather than in a distinct opcode byte sequence, because the tested dense OMMA scale variants keep opcode bytes stable while their control codes and displayed scale suffixes change.
+
+[OBS] Chapter 16 observes chained OMMA forms where the first instruction can use `C=RZ` and subsequent OMMAs use the previous D accumulator register as C.
+
+[OBS] Chapter 16 observes `.reuse` on the B and SFB operands for non-terminal OMMAs in the 16d chain: examples include `R2.reuse` for B and `R8.reuse` for the scale operand.
+
+[OBS] Chapter 16 observes that the last OMMA in the 16d chain drops `.reuse` on both B and SFB: `OMMA.SF.16864.F32.E2M1.E2M1.UE4M3.4X R12, R4, R2, R12, R8, R8, URZ`.
+
+[OBS] Chapter 16 observes chain-specific control-code transitions in 16d: the first OMMA uses `0x084ff60000043eff`, middle OMMAs use `0x080ff60000043e0c`, and the last OMMA uses `0x000ff00000043e0c`.
+
+[INF] The control-code transition is consistent with scoreboard-coordinated waiting on the previous accumulator result, matching the Chapter 16 interpretation and the earlier MMA-chain model.
+
+**Variants**
+
+[OBS] Chapter 16 observes the dense QMMA.SF baseline for `kind::mxf8f6f4`: `QMMA.SF.16832.F32.E4M3.E4M3.E8`.
+
+[INF] The dense QMMA.SF baseline is related block-scaled evidence, but it is not the OMMA pattern itself because the low opcode byte remains `0x7a`.
+
+[OBS] Chapter 16 observes the dense OMMA 2X ue8m0 path in 16b: `OMMA.SF.16864.F32.E2M1.E2M1.E8`.
+
+[OBS] Chapter 16 observes the dense OMMA 4X ue4m3 peak path in 16c: `OMMA.SF.16864.F32.E2M1.E2M1.UE4M3.4X`.
+
+[OBS] Chapter 16 observes N-OMMA serial chains in 16d for N=16, N=32, and N=64, bracketed by `clock64()` for latency measurement.
+
+[OBS] Chapter 19 observes sparse block-scaled `OMMA.SF.SP.168128...` variants that preserve OMMA low byte `0x7f` but add sparse metadata and selector operands.
+
+[INF] Sparse `OMMA.SF.SP.168128...` is supporting OMMA-family evidence, not the dense `OMMA.SF.16864` signature itself.
+
+[OBS] Chapter 24 observes production-like OMMA contexts, including `OMMA.SF.16864.F32.E2M1.E2M1.UE4M3.4X` and sparse `OMMA.SF.SP.168128...` forms.
+
+[OBS] Chapter 25 observes OMMA accumulator paths feeding STSM epilogues, including `OMMA.SF.16864.F32.E2M1.E2M1.UE4M3.4X` before `STSM`.
+
+**Interpretation**
+
+[INF] Consecutive dense OMMAs with the previous D accumulator reused as C identify a dense block-scaled FP4 tensor-core accumulator dependency chain.
+
+[INF] The `.SF` modifier and post-C scale operands identify the scale-factor data path. Scale factors should be tracked as a separate dependency channel from A/B fragment data in production audits.
+
+[INF] The `.UE4M3.4X` suffix identifies the fine-grained FP4 peak path observed in Chapter 16, while `.E8` without `.4X` identifies the tested default 2X ue8m0 dense OMMA path.
+
+[INF] `.reuse` on B and SFB identifies ptxas preparing for later OMMAs to re-read those operands across the chain. The exact reuse-cache placement policy is not fully decoded.
+
+[INF] The absence of `.reuse` on the last OMMA is consistent with no later OMMA consumer of those B and SFB operands in the observed chain.
+
+[INF] The control-code wait transition identifies scoreboard-coordinated variable-latency chaining. Chapter 16 resolves the dense OMMA 4X serial dependency-chain latency at approximately 29 cycles per `OMMA.SF.16864.F32.E2M1.E2M1.UE4M3.4X` on SM120.
+
+[INF] The 29-cycle number is a dependency-chain latency result, not a throughput result. It applies when each OMMA must wait on the previous OMMA's accumulator output.
+
+[INF] The Chapter 16 result shows the tested OMMA chain has lower serial latency and more work per instruction than HMMA and dense QMMA. It does not prove the advertised peak TFLOPS, because peak requires pipelined throughput with multiple independent MMAs in flight.
+
+**Anti-patterns**
+
+[INF] A single `OMMA.SF.16864.*` instruction is block-scaled FP4 tensor-core compute evidence, but it is not an accumulator-chain pattern unless a later OMMA reads the previous accumulator through C or the surrounding SASS shows the dependency.
+
+[INF] `QMMA.SF.16832.*` is block-scaled low-precision tensor-core evidence, but it remains a QMMA-family pattern with low opcode byte `0x7a`, not OMMA.
+
+[INF] `OMMA.SF.SP.168128.*` is a sparse block-scaled OMMA-family form. It should not be collapsed into the dense OMMA chain signature without preserving sparse metadata operands and sparse-specific gaps.
+
+[INF] OMMA followed by `STG`, `STSM`, or scalar arithmetic is an accumulator consumer path, not an OMMA chain unless a later OMMA reuses the accumulator as C.
+
+**Open gaps**
+
+[GAP] Dense mxf4nvf4 4X with ue8m0 is not tested; Chapter 19 sparse evidence constrains this combination for sparse OMMA, but dense OMMA scale-mode encoding remains not fully disambiguated.
+
+[GAP] OMMA throughput across independent, non-chained configurations is not established by the Chapter 16 latency chain; the measured 29 cycles is serial dependency-chain latency, not tensor-core throughput.
+
+[GAP] Scale factor values other than 1.0 are not tested in Chapter 16; real block-scaled kernels use diverse scale values.
+
+[GAP] FP4 E2M1 register and lane-to-value layout remains unresolved for full productive FP4 audits, independent of the OMMA opcode signature.
+
+[GAP] Sparse OMMA latency is not measured; sparse `OMMA.SF.SP` forms are structurally observed but not latency-characterized.
+
+[GAP] NCU validation of the Chapter 16 latency and pipeline-utilization interpretation was not performed.
+
+---
+
+### PATTERN-05: LDSM fragment loading
+
+**Category**: memory
+**Evidence**: [OBS] Chapter 17 contains the controlled LDSM family observations for `ldmatrix.sync.aligned` on SM120; Chapters 18, 23, and 24 contain supporting pipelined, low-precision, and production-like contexts where LDSM feeds tensor-core instructions.
+**Confidence**: [INF] C2 for Chapter 17 controlled width, transpose, and LDSM-to-HMMA observations; C3 for the Chapter 17 clock64 latency microbenchmark; C1 for static recognition in future production dumps unless source, runtime, or profile evidence is added.
+
+**Plain English**
+
+[INF] An LDSM fragment-loading pattern is the shared-memory-to-tensor-core handoff. The kernel has already staged tile data in shared memory, and LDSM loads that data into the register fragment layout expected by a later MMA instruction.
+
+[INF] In GEMM or attention terms, this is the step between "the tile is in shared memory" and "the tensor core can multiply it." LDSM does not do the multiply; it prepares the A or B operand fragments that HMMA, QMMA, or OMMA will consume.
+
+[INF] Seeing LDSM near an MMA instruction is strong structural evidence for a tensor-core tile pipeline fed from shared memory. It is not, by itself, proof of the complete source loop, double-buffering strategy, lane-to-value layout, numeric correctness, or tensor-core throughput.
+
+**SASS signature**
+
+[OBS] Chapter 17 observes the SM120 LDSM mnemonic family as `LDSM.16.M[T]88[.<N>] R_dst, [R_addr(+UR_base)?]`.
+
+[OBS] Chapter 17 observes `LDSM.16.M88`, `LDSM.16.M88.2`, `LDSM.16.M88.4`, and `LDSM.16.MT88.4` for the tested x1, x2, x4, and x4-transposed `ldmatrix.sync.aligned` variants.
+
+[INF] In the observed mnemonic, `.16` identifies b16 element movement, `M88` identifies the m8n8 matrix shape, `MT88` identifies the transposed form, and the absent, `.2`, or `.4` width suffix identifies x1, x2, or x4.
+
+[OBS] Chapter 17 observes the LDSM opcode family with low opcode byte `0x3b`; the base opcode bytes are reported as `0x000000000004783b` with destination-register encoding in the opcode bytes.
+
+[OBS] Chapter 17 observes that opcode bytes remain invariant across the tested width and transpose variants when the destination register base is unchanged.
+
+[INF] Width and transpose selection therefore live in control-code fields for the tested SM120 forms, not in a separate opcode byte sequence.
+
+[RES] Chapter 17 decodes LDSM control-code bits 8-9 as the tested width field: `00` for x1, `01` for x2, and `10` for x4.
+
+[RES] Chapter 17 decodes LDSM control-code bit 14 as the transpose flag by comparing the x4 non-transposed and x4-transposed variants.
+
+[OBS] Chapter 17 observes both `[R+UR]` and `[R]` address forms; Chapter 24 observes immediate-offset shared-memory forms such as `LDSM.16.M88[.2|.4] R, [R+imm]`.
+
+[OBS] Chapter 17's production combo observes `LDSM.16.M88.2 R10, [R7+UR5]` followed by `LDSM.16.M88.4 R12, [R6+UR4]`, then `HMMA.16816.F32 R12, R12, R10, RZ`.
+
+[OBS] In that observed combo, the LDSM destination register bases are also the HMMA source register bases: `R10` for the HMMA B operand and `R12` for the HMMA A operand.
+
+[INF] The A/B fragment role is contextual and should be derived from the consuming MMA operand flow, not from the LDSM mnemonic alone.
+
+[OBS] Chapter 17 observes zero explicit NOPs between the two LDSM instructions and the following HMMA in the production combo.
+
+[OBS] Chapter 17 observes an HMMA wait mask of `0xff` in the direct LDSM-fed HMMA case.
+
+[RES] Chapter 17 resolves that the observed LDSM-to-HMMA handoff is scoreboard-coordinated through control code rather than explicit NOP padding.
+
+**Variants**
+
+[OBS] Chapter 17 observes x1, x2, and x4 non-transposed b16 matrix loads: `LDSM.16.M88`, `LDSM.16.M88.2`, and `LDSM.16.M88.4`.
+
+[OBS] Chapter 17 observes the x4 transposed b16 matrix load as `LDSM.16.MT88.4`.
+
+[INF] The x1 and x2 transposed forms are predicted by the decoded mnemonic and control-code model, but they are not compiled observations in Chapter 17.
+
+[OBS] Chapter 17 observes a production-style LDSM.x2 plus LDSM.x4 pair immediately feeding `HMMA.16816.F32`.
+
+[OBS] Chapters 17, 18, and 24 observe `LDSM.16.M88.2` emitted before `LDSM.16.M88.4` in the tested MMA-consuming tile contexts.
+
+[HYP] The cause of that emission order is ptxas scheduling or allocation policy; the corpus does not establish a universal hardware requirement for x2-before-x4 ordering.
+
+[OBS] Chapter 17 observes a chained `LDSM.16.M88` latency microbenchmark for N=16, N=32, and N=64 bracketed by `clock64()`.
+
+[OBS] Chapter 23 observes LDSM-fed QMMA paths as structurally distinct from direct-register QMMA paths.
+
+[OBS] Chapter 24 observes production-like async-staging contexts where `LDGSTS`, dependency waits, barriers, LDSM, and MMA appear in one tile pipeline.
+
+**Interpretation**
+
+[INF] A cluster of LDSM instructions before HMMA, QMMA, or OMMA identifies the fragment-load stage of a shared-memory-fed tensor-core tile.
+
+[INF] When LDSM destination register bases are reused directly as MMA source operands, the dump shows a zero-copy fragment handoff from shared memory into tensor-core operands.
+
+[INF] The observed x2-plus-x4 pairing is the common two-fragment supply shape in the studied HMMA/QMMA tile contexts, but width alone should not be used to name an operand A or B without checking the consuming MMA operands.
+
+[INF] The Chapter 17 latency result supports an approximate serial dependency-chain latency of 33 cycles per `LDSM.16.M88` on SM120.
+
+[INF] The 33-cycle number is a chained-latency result, not an LDSM throughput result and not a complete tile-loop cost model.
+
+[INF] In pipelined kernels, LDSM can overlap with other tile work when dependencies allow; the mere presence of LDSM does not prove whether the kernel is well pipelined.
+
+[INF] Direct LDSM-to-MMA consumers should be audited together with their wait masks and scoreboard fields, because surrounding LDGSTS, LDGDEPBAR, DEPBAR, and BAR instructions can change which waits are active.
+
+**Anti-patterns**
+
+[INF] `LDS`, `STS`, and `LDGSTS` are shared-memory or global-to-shared movement evidence, but they are not LDSM matrix-fragment loads.
+
+[INF] A standalone LDSM without a nearby tensor-core consumer identifies a matrix-load instruction, not a complete GEMM, attention, or MMA accumulator pattern.
+
+[INF] `LDSM.16.M88.2` should not automatically be labeled B, and `LDSM.16.M88.4` should not automatically be labeled A; those labels require operand-flow evidence from the consuming MMA.
+
+[INF] LDSM feeding QMMA or OMMA proves the fragment supply path structurally, but it does not prove packed FP4/FP6 value layout or final numeric correctness without output validation.
+
+[INF] A barrier or dependency wait before LDSM belongs to the shared-memory staging pipeline. It should not be collapsed into the LDSM pattern unless the audit question is specifically about the full tile pipeline.
+
+**Open gaps**
+
+[GAP] The x1 and x2 transposed LDSM forms are inferred by the decoded model but not compiled in the Chapter 17 test set.
+
+[GAP] The width field value `3` is unused in the tested corpus; no width greater than x4 is observed.
+
+[GAP] LDSM element sizes other than `.16` are not established by the current controlled tests.
+
+[GAP] Complete lane-to-fragment and lane-to-value mapping remains unresolved across all width and transpose combinations.
+
+[GAP] LDSM scoreboard slot allocation and complete universal control-code bit placement remain partially decoded, not fully modeled.
+
+[GAP] LDSM-fed FP4 and FP6 QMMA paths in Chapter 23 remain structural evidence until packed-value layouts and outputs are validated on hardware.
+
+---
+
+### PATTERN-06: Async global-to-shared tile pipeline
+
+**Category**: memory
+**Evidence**: [OBS] Chapter 18 contains the controlled `cp.async` pipeline observations for SM120; Chapter 24 contains production-like mini-GEMM contexts where `LDGSTS`, `LDGDEPBAR`, `DEPBAR`, `BAR`, `LDSM`, MMA, and `STG` appear together.
+**Confidence**: [INF] C2 for Chapter 18 controlled 2-stage, looped, and 3-stage async-copy variants; C3 for Chapter 24 runtime smoke execution of production-like mini-GEMM probes; C1 for static recognition in future production dumps unless source, runtime, correctness, or profile evidence is added.
+
+**Plain English**
+
+[INF] An async global-to-shared tile pipeline is the SASS shape behind prefetching the next GEMM or attention tile from global memory into shared memory while tensor cores work on an earlier tile.
+
+[INF] In source-level terms, this is the `cp.async` mainloop idea: copy tile data into shared memory, commit that copy group, wait only when the tile is needed, synchronize the CTA, then use LDSM and MMA to consume the staged tile.
+
+[INF] The goal of the pattern is latency hiding. The copy path and the compute path are deliberately overlapped so global-memory latency is less visible to the tensor-core work.
+
+[INF] Seeing this pattern in a dump is evidence for an async shared-memory staging pipeline. It does not by itself prove the kernel is bandwidth optimal, numerically correct, double-buffered in the source, or equivalent to a production library implementation.
+
+**SASS signature**
+
+[OBS] Chapter 18 observes PTX `cp.async.ca.shared.global.L2::128B` lowering to `LDGSTS.E.LTC128B.128 [R_smem], desc[UR_desc][R_gmem.64]`.
+
+[OBS] Chapter 18 observes `LDGSTS.E.LTC128B.128` with low opcode byte `0xae`, distinct from the observed LDG, LDS, and STS opcode families.
+
+[INF] In the observed mnemonic, `LDGSTS` is the global-to-shared async transfer, `.E` is the extended-addressing form, `.LTC128B` is the observed L2 cache hint, and `.128` is the observed 128-bit per-thread transfer width.
+
+[OBS] Chapter 18 observes PTX `cp.async.commit_group` lowering to operandless `LDGDEPBAR`.
+
+[OBS] Chapter 18 observes `LDGDEPBAR` opcode bytes `0x00000000000079af`.
+
+[OBS] Chapter 18 observes PTX `cp.async.wait_group N` lowering to `DEPBAR.LE SB0, N`.
+
+[OBS] Chapter 18 observes `DEPBAR.LE SB0, 0x0`, `DEPBAR.LE SB0, 0x1`, and `DEPBAR.LE SB0, 0x2` in the tested 2-stage and 3-stage variants.
+
+[RES] Chapter 18 decodes the tested `DEPBAR.LE SB0, N` argument in control-code bits 38-39: `00` for N=0, `01` for N=1, and `10` for N=2.
+
+[INF] The unused `11` value predicts N=3 for the same 2-bit wait-group field, but Chapter 18 does not compile an N=3 case.
+
+[OBS] Chapter 18 observes all tested async-copy waits targeting `SB0`.
+
+[INF] For the tested SM120 `cp.async` forms, SB0 is the observed async-copy dependency bank. Other scoreboard banks are not established by this corpus.
+
+[OBS] Chapter 18 observes the recurring pre-LDGSTS triplet `@!PT LDS RZ, [RZ]` before LDGSTS groups.
+
+[GAP] The purpose of the `@!PT LDS RZ, [RZ]` triplet is not decoded; Chapter 18 treats it as a scheduling, resource, or alignment marker candidate rather than a functional shared-memory load.
+
+[OBS] Chapter 24 observes production-like single-stage async structure in 24e: `LDGSTS.E.LTC128B.128`, `LDGDEPBAR`, `DEPBAR.LE SB0, 0x0`, `LDSM.16.M88.2`, `LDSM.16.M88.4`, then `HMMA.16816.F32`.
+
+[OBS] Chapter 24 observes production-like double-buffer async structure in 24f and 24t: two `LDGSTS` groups with `LDGDEPBAR` commits before `DEPBAR.LE SB0, 0x0`, followed by LDSM and HMMA.
+
+[OBS] Chapter 24 observes wait-depth variants in 24x with `DEPBAR.LE SB0, 0x2`, `DEPBAR.LE SB0, 0x1`, and `DEPBAR.LE SB0, 0x0`.
+
+**Variants**
+
+[OBS] Chapter 18 observes an unrolled 2-stage pipeline in 18a.
+
+[OBS] Chapter 18 observes a looped 2-stage K-loop in 18b where the SASS contains a real counter update, predicate compare, and `BRA` back-edge.
+
+[OBS] Chapter 18 observes a 3-stage pipeline in 18c specifically to isolate `DEPBAR.LE` wait-group values N=2, N=1, and N=0.
+
+[OBS] Chapter 24 observes single-stage, double-buffer, full-audit, and barrier/wait mini-GEMM variants that reuse the Chapter 18 async-copy instruction family.
+
+[OBS] Chapter 18 observes ptxas moving the LDSM for tile 1 before the HMMA for tile 0 in the fully unrolled 18a schedule.
+
+[INF] That schedule is software-pipelined at the SASS level: later tile fragment loading can overlap with current tile tensor-core compute when dependencies allow.
+
+**Interpretation**
+
+[INF] The minimal async-copy staging signature is `LDGSTS` for the transfer, `LDGDEPBAR` for the commit group, and `DEPBAR.LE SB0, N` for the wait group.
+
+[INF] A full tensor-core tile pipeline then adds the already documented LDSM fragment-load pattern and an MMA compute pattern after the wait and CTA synchronization.
+
+[INF] `DEPBAR.LE SB0, 0x1` in a 2-stage mainloop means the code waits until the older tile is ready while allowing one newer copy group to remain in flight.
+
+[INF] `DEPBAR.LE SB0, 0x0` is the observed wait-all form and commonly appears before consuming the final staged tile or in single-stage probes.
+
+[INF] The observed `LDGSTS`/`LDGDEPBAR`/`DEPBAR` sequence identifies async staging, but performance conclusions require profiling or timing evidence because global-memory latency depends on cache state, bandwidth, occupancy, and overlap.
+
+[INF] The presence of a loop back-edge around one prefetch plus one consume step identifies a mainloop structure, while an unrolled sequence may represent the same staging strategy without an explicit SASS loop.
+
+[INF] HMMA wait masks can differ between direct LDSM-fed cases and async-pipeline cases, so an audit should not assume the direct `0xff` wait mask from `PATTERN-05` applies inside an LDGSTS/DEPBAR pipeline.
+
+**Anti-patterns**
+
+[INF] Plain `LDG` followed later by `STS` is not this async-copy pattern unless the dump also shows the `LDGSTS`/`LDGDEPBAR`/`DEPBAR.LE` family.
+
+[INF] LDSM plus MMA without preceding `LDGSTS` and async dependency waits is the fragment-loading pattern, not the async global-to-shared pipeline.
+
+[INF] A single `LDGSTS` proves an async global-to-shared transfer instruction is present, but it does not prove a correctly staged GEMM mainloop without commit, wait, synchronization, and consumer context.
+
+[INF] `DEPBAR.LE SB0, N` should not be interpreted as a generic CTA barrier. CTA synchronization remains visible separately through `BAR.SYNC` forms.
+
+[INF] The pre-LDGSTS `@!PT LDS RZ, [RZ]` triplet should not be treated as functional shared-memory traffic until its scheduling role is decoded.
+
+**Open gaps**
+
+[GAP] The `@!PT LDS RZ, [RZ]` triplet before LDGSTS remains unresolved.
+
+[GAP] Only the observed `cp.async.ca.shared.global.L2::128B` path is covered; other PTX cache hints or transfer shapes may lower differently.
+
+[GAP] The predicted N=3 `DEPBAR.LE SB0, 0x3` form is not compiled in the current corpus.
+
+[GAP] LDGSTS latency and throughput are not microbenchmarked; the corpus does not provide a cycles-per-LDGSTS model.
+
+[GAP] Scoreboard banks other than SB0 are not observed for the tested SM120 async-copy path.
+
+[GAP] Full production-library comparison against CUTLASS, FlashAttention, or vendor kernels remains future Phase 4 work.
+
+---
+
+### PATTERN-07: STSM matrix-store epilogue
+
+**Category**: memory
+**Evidence**: [OBS] Chapter 22 establishes the SM120 b16 `STSM` matrix-store family; Chapter 25 contains the dedicated epilogue and storeback probes, including HMMA, QMMA, OMMA, sparse QMMA, narrowing, reload, and global-store contexts.
+**Confidence**: [INF] C2 for Chapter 22 and Chapter 25 controlled STSM width, transpose, fallback, and accumulator-path variants; C3 for Chapter 25 runtime smoke execution of accepted executable probes; C1 for static recognition in future production dumps unless source, numeric, profile, or cross-context evidence is added.
+
+**Plain English**
+
+[INF] An STSM matrix-store epilogue is the storeback side of a tensor-core tile. After MMA instructions produce accumulator fragments in registers, STSM writes matrix-shaped fragments into shared memory so the kernel can reload, rearrange, narrow, or globally store the result.
+
+[INF] In GEMM terms, LDSM is how tile data enters tensor-core registers from shared memory, while STSM is the matching matrix-store tool often seen on the way out of the accumulator path.
+
+[INF] The common epilogue shape is: tensor-core compute produces registers, optional conversion narrows those values, STSM writes them into shared memory, a CTA barrier makes the shared data visible, LDS reloads it in a store-friendly shape, and STG writes global memory.
+
+[INF] Seeing this pattern is evidence for a matrix-storeback epilogue. It does not by itself prove the full lane-to-value layout, final numeric correctness, global-store coalescing quality, or optimal epilogue performance.
+
+**SASS signature**
+
+[OBS] Chapter 22 observes PTX `stmatrix.sync.aligned` lowering to the tested b16 SASS family `STSM.16.M[T]88[.2|.4]` on SM120.
+
+[OBS] Chapter 22 observes `STSM.16.M88`, `STSM.16.M88.2`, `STSM.16.M88.4`, `STSM.16.MT88`, `STSM.16.MT88.2`, and `STSM.16.MT88.4` for x1, x2, x4, and transposed m8n8 b16 forms.
+
+[OBS] Chapter 22 observes the visible low opcode word for tested STSM forms ending in low byte `0x44`.
+
+[INF] In the observed b16 mnemonic, `.16` identifies the b16 matrix-store family, `M88` identifies the m8n8 shape, `MT88` identifies the transposed shape, and absent, `.2`, or `.4` suffixes identify x1, x2, or x4 width.
+
+[OBS] The STSM operand order is shared-memory destination address first, then source register base: examples include `STSM.16.M88.4 [R0], R8` and `STSM.16.MT88.4 [R0], R8`.
+
+[OBS] Chapter 22 observes ordinary shared-store fallback `STS.128 [R0], R8` in variant 22g, and that fallback does not emit `STSM`.
+
+[INF] `STS.128` can be a vectorized shared-store implementation, but it is not the matrix-store STSM family.
+
+[OBS] Chapter 25 observes accepted storeback probes with `BAR.SYNC.DEFER_BLOCKING` followed by `LDS.128` after STSM.
+
+[OBS] Chapter 25 observes global storeback probes emitting scalar `STG.E` stores after the shared-memory reload path.
+
+[OBS] Chapter 25 observes `STSM.16.M88.4` after `HMMA.16816.F32`, `QMMA.16832.F32.E2M1.E2M1`, `OMMA.SF.16864.F32.E2M1.E2M1.UE4M3.4X`, and `QMMA.SP.16864.F32.E4M3.E4M3` accumulator paths.
+
+[RES] Chapter 25 resolves that the tested dense, block-scaled, and sparse accumulator paths all preserve a visible STSM epilogue.
+
+[OBS] Chapter 25 observes `F2F.F16.F32` and `F2F.BF16.F32` conversions before STSM in narrowing probes.
+
+[RES] Chapter 25 resolves that accumulator narrowing is separable from matrix-store recognition: conversion instructions appear before the STSM family rather than replacing the STSM signature.
+
+**Variants**
+
+[OBS] Chapter 22 observes isolated x1, x2, and x4 b16 STSM forms with and without transpose.
+
+[OBS] Chapter 25 observes raw runtime-layout probes for the same b16 STSM width and transpose families.
+
+[OBS] Chapter 25 observes `STSM -> BAR -> LDS -> STG` storeback structure in accepted epilogue probes.
+
+[OBS] Chapter 25 observes a no-barrier contrast in 25n with adjacent `STSM` and `LDS` without intervening `BAR`.
+
+[INF] The no-barrier contrast is useful for SASS matching, but it is not evidence that cross-thread shared-memory visibility is correct without a CTA barrier.
+
+[OBS] Chapter 25 observes split-accumulator storeback in 25o with two `STSM.16.M88.4` stores and two `LDS.128` reloads.
+
+[OBS] Chapter 25 observes register-pressure epilogue variant 25y preserving the `STSM -> BAR -> LDS -> STG` structure.
+
+[OBS] Chapter 25 observes b8 matrix-store forms `STSM.8.MT168`, `STSM.8.MT168.2`, and `STSM.8.MT168.4` for the tested `sm_120a` target.
+
+[OBS] Chapter 25 also captures plain `sm_120` ptxas rejection of the tested `.m16n8` and `stmatrix.b8` PTX forms.
+
+[RES] Claims about b8 STSM support must name the target: rejected for tested plain `sm_120`, accepted for tested `sm_120a`.
+
+**Interpretation**
+
+[INF] A visible STSM following an MMA accumulator path identifies a matrix-shaped shared-memory epilogue stage, not just ordinary scalar shared stores.
+
+[INF] The stronger production-audit signature is STSM followed by a CTA barrier, shared reload, and global stores, because that sequence shows matrix fragments being materialized in shared memory and then moved to the global-output path.
+
+[INF] STSM width and transpose suffixes should be read as storeback layout controls, but the exact lane-to-value semantic mapping still requires the captured runtime outputs and follow-up decode work.
+
+[INF] If conversion instructions appear before STSM, the audit should treat narrowing as a separate epilogue substage before matrix-storeback.
+
+[INF] A split-accumulator epilogue can contain more than one STSM group, so a matcher should not assume exactly one STSM per output tile.
+
+**Anti-patterns**
+
+[INF] `STS`, `STS.128`, and scalar C++ shared stores are shared-memory store evidence, but they are not the STSM matrix-store pattern.
+
+[INF] STSM alone proves a matrix-store instruction is present, but it does not prove complete global storeback without the reload and STG context.
+
+[INF] STSM after HMMA, QMMA, or OMMA should not be cited as final numeric correctness unless the output path and reference comparison are also validated.
+
+[INF] `STSM.8.MT168*` should not be generalized to all SM120 targets; the current evidence is target-qualified to tested `sm_120a`, while tested plain `sm_120` rejects the PTX forms.
+
+[INF] Adjacent STSM and LDS without `BAR.SYNC` should not be treated as safe cross-thread visibility evidence.
+
+**Open gaps**
+
+[GAP] Full lane-to-value STSM layout remains undecoded from the runtime output words.
+
+[GAP] STSM latency is not measured.
+
+[GAP] STSM scoreboard and complete control-code bit placement remain open beyond printed SASS/control annotations and denvdis field names.
+
+[GAP] Global-store coalescing and production epilogue performance are not established by the Chapter 25 smoke probes.
+
+[GAP] Cross-context comparison against production CUTLASS, FlashAttention, or vendor epilogues remains Phase 4 work.
+
+---
+
+### PATTERN-08: Divergence and reconvergence control
+
+**Category**: control_flow
+**Evidence**: [OBS] Chapter 20 contains controlled loop, predication, `break`, and back-edge observations; Chapter 21 contains controlled lane-divergence, reconvergence, vote, guarded HMMA, local-call, and tail-store observations; Chapter 24 contains production-like guarded HMMA and cold-error-path contexts.
+**Confidence**: [INF] C2 for Chapter 20 and Chapter 21 controlled source-shape variants; C1 for static recognition in future production dumps unless source mapping or runtime validation is added. Runtime behavior of the Chapter 21 probes remains a gap because the driver was unavailable in that environment.
+
+**Plain English**
+
+[INF] A divergence and reconvergence control pattern is how SASS represents lanes of a warp taking different logical paths and later returning to a common execution point.
+
+[INF] The important rule is that lane-dependent source code does not always become a visible `BSSY`/`BSYNC` region. ptxas can choose predicated arithmetic, select instructions, predicated exits, predicated stores, ordinary forward branches, explicit reconvergence scopes, vote-based control, or `WARPSYNC.ALL` depending on the code shape.
+
+[INF] In practical audits, this pattern tells the reader how to avoid over-reading control flow. A predicated instruction may be a cheap local choice, while `BSSY.RECONVERGENT` plus `BSYNC.RECONVERGENT` marks a branch-kept region that ptxas decided needs explicit reconvergence tracking.
+
+[INF] Seeing this pattern is evidence for control-flow lowering structure. It does not by itself prove runtime mask behavior, branch probability, divergence cost, or correctness of partially predicated tensor-core execution.
+
+**SASS signature**
+
+[OBS] Chapter 20 observes preserved loops through backward `BRA` or `BRA.U` targets.
+
+[RES] Ordinary preserved loops do not require `BSSY`/`BSYNC` in the tested variants.
+
+[OBS] Chapter 20 observes `BSSY.RECONVERGENT B0, 0x1c0` and `BSYNC.RECONVERGENT B0` in the tested dynamic `break` loop, while short conditional bodies, larger conditional bodies, and `continue` variants emit no BSSY/BSYNC.
+
+[OBS] Chapter 21 observes BSSY/BSYNC in exactly six of twenty tested divergence variants: 21c, 21e, 21f, 21l, 21o, and 21r.
+
+[OBS] Chapter 21 observes lane-dependent control without BSSY/BSYNC in 21a, 21d, 21h, 21i, 21j, 21k, 21m, 21n, 21p, 21q, 21s, and 21t.
+
+[RES] Chapter 21 rejects the hypothesis that lane divergence alone always forces visible BSSY/BSYNC.
+
+[OBS] Chapter 21 observes the branch-kept divergent arithmetic form in 21c: `BSSY.RECONVERGENT B0, 0x1e0`, a predicated forward `BRA`, divergent arithmetic, and `BSYNC.RECONVERGENT B0`.
+
+[OBS] Chapter 21 observes nested divergence in 21e with one BSSY/BSYNC pair and forward branches inside the reconvergence region.
+
+[OBS] Chapter 21 observes long divergent-body lowering in 21l with one BSSY/BSYNC pair around the long divergent body.
+
+[OBS] Chapter 21 observes lane-dependent `break` in 21f and lane-dependent trip count in 21o using BSSY/BSYNC plus useful loop back-edges.
+
+[OBS] Chapter 21 observes divergent noinline call lowering in 21r with `BSSY.RECONVERGENT B0, 0x170`, a predicated branch, `CALL.REL.NOINC`, `BSYNC.RECONVERGENT B0`, and a callee ending in `RET.REL.NODEC`.
+
+[OBS] Chapter 21 observes predicated datapath lowering without BSSY/BSYNC: 21a uses predicated `FADD`, 21d uses predicated arithmetic on both paths, and 21k uses `FSEL`.
+
+[OBS] Chapter 21 observes predicated exit and tail-store lowering without BSSY/BSYNC in 21h, 21p, and 21q.
+
+[OBS] Chapter 21 observes vote and warp-level control forms without BSSY/BSYNC: `VOTE.ANY R5, PT, P0` in 21j and `VOTE.ANY P0, P0` before a branch guarding `SHFL.IDX` in 21t.
+
+[OBS] Chapter 21 observes guarded tensor-core execution in 21n as predicated setup, `@P0 WARPSYNC.ALL`, and `@P0 HMMA.16816.F32`, with no BSSY/BSYNC.
+
+[OBS] Chapter 24 observes supporting production-like forms: 24o emits predicated guarded HMMA plus `WARPSYNC.ALL`, and 24ad emits `BSSY.RECONVERGENT`, `BSYNC.RECONVERGENT`, and `BPT.TRAP` around a cold path.
+
+**Variants**
+
+[OBS] Predicated arithmetic variants include 21a and 21d, where lane-dependent choices are represented by predicated math and no explicit reconvergence scope.
+
+[OBS] Select variants include `FSEL` in 21i and 21k, and `UFSEL` in the uniform-branch 21b case.
+
+[OBS] Predicated exit variants include early return and bounds/tail checks in 21h, 21p, and 21q.
+
+[OBS] Explicit reconvergence variants include branch-kept divergent arithmetic, nested divergent control, lane-dependent break, lane-dependent trip count, and divergent local calls.
+
+[OBS] Guarded warp-level variants include `VOTE.ANY`, `SHFL.IDX`, `WARPSYNC.ALL`, and predicated HMMA contexts in Chapter 21.
+
+**Interpretation**
+
+[INF] `BSSY.RECONVERGENT Bn, target` opens a reconvergence scope and `BSYNC.RECONVERGENT Bn` closes it for the same barrier register in the observed patterns.
+
+[INF] The branch target on BSSY is the reconvergence point to inspect first, but full stack semantics and barrier-register allocation beyond the observed B0 cases remain unresolved.
+
+[INF] In the tested variants, BSSY/BSYNC is associated with divergent regions that ptxas keeps as explicit control regions or local calls, not with every lane-derived predicate.
+
+[INF] Predicated arithmetic, `FSEL`, `UFSEL`, predicated `EXIT`, and predicated `STG` should be treated as control-flow lowering forms, even when there is no explicit branch region.
+
+[INF] `@P0 WARPSYNC.ALL` before `@P0 HMMA` identifies guarded warp-level tensor-core execution in the tested source, but it does not establish full `WARPSYNC.ALL` semantics or safe behavior for all partial-lane MMA patterns.
+
+[INF] A backward `BRA`/`BRA.U` identifies a preserved SASS loop, while BSSY/BSYNC identifies reconvergence machinery. These are related control-flow features but should not be collapsed into one loop signature.
+
+**Anti-patterns**
+
+[INF] A lane-derived predicate alone is not enough to claim explicit reconvergence; Chapter 21 shows many lane-dependent variants without BSSY/BSYNC.
+
+[INF] A backward `BRA.U` alone identifies a loop back-edge, not a divergence/reconvergence scope.
+
+[INF] `BAR.SYNC` is CTA synchronization, not a substitute name for warp reconvergence through BSSY/BSYNC.
+
+[INF] `WARPSYNC.ALL` by itself is not a reduction signature and not proof of BSSY/BSYNC-style reconvergence.
+
+[INF] A predicated `EXIT` or predicated `STG` in a tail path should not be classified as a full branch-kept reconvergence region unless the BSSY/BSYNC region is visible.
+
+**Open gaps**
+
+[GAP] Runtime validation of Chapter 21 variants remains blocked by unavailable driver evidence in that chapter.
+
+[GAP] Exact ptxas threshold for predication/select versus explicit BSSY branch region remains unresolved.
+
+[GAP] `WARPSYNC.ALL` control-code bits, predicate behavior, and interaction with HMMA, LDSM, and SHFL remain unresolved.
+
+[GAP] Non-full warp masks after genuine divergence remain under-tested.
+
+[GAP] Exact BSSY/BSYNC stack semantics and barrier-register allocation beyond B0 remain unresolved.
+
+---
+
+### PATTERN-09: Register spill and local-memory frame
+
+**Category**: memory
+**Evidence**: [OBS] Kernel 12 contains the controlled SM120 register-pressure and local-array observations for this pattern.
+**Confidence**: [INF] C2 for Kernel 12 controlled `-maxrregcount`, accumulator-pressure, local-array, and call-argument variants; C1 for static recognition in future production dumps unless source mapping, runtime validation, or profiling is added.
+
+**Plain English**
+
+[INF] A register spill means ptxas could not keep every live value in registers, so it stores some per-thread values in local memory and later reloads them.
+
+[INF] Local memory is not shared memory. It is per-thread storage addressed through the stack pointer path, and it usually lives behind the memory system rather than inside the register file.
+
+[INF] In source-level terms, this can come from too much register pressure, a forced register limit, or an actual local array such as `int arr[64]`. The SASS signature is a stack-frame allocation plus `STL` and `LDL` traffic.
+
+[INF] Seeing this pattern is evidence for local-memory traffic. It does not by itself prove a performance bottleneck, because ptxas may interleave spills with compute, and the runtime cost depends on cache behavior, occupancy, and how frequently the path executes.
+
+**SASS signature**
+
+[OBS] Kernel 12 observes the standard stack pointer register `R1` loaded from `c[0x0][0x37c]` even in kernels that do not spill.
+
+[OBS] Kernel 12 observes an additional stack-frame allocation when local memory is needed: `IADD R1, R1, -0x128` in 12i and `IADD R1, R1, -0x100` in 12k.
+
+[INF] The extra negative `IADD` on `R1` after the standard prologue is the first strong static signal that the kernel has a local-memory frame for spills or local arrays.
+
+[OBS] Kernel 12 observes scalar local-memory stores as `STL [R1+offset], R` and scalar local-memory loads as `LDL R, [R1+offset]`.
+
+[OBS] Kernel 12 observes `LDL.LU R, [R1+offset]` in 12i on local loads whose destination is consumed soon after reload.
+
+[HYP] The `.LU` suffix is a last-use hint for local-memory caching or scheduling; Kernel 12 observes the usage pattern but does not decode the cache semantics.
+
+[OBS] Kernel 12 observes vectorized local stores as `STL.128 [R1+offset], R` in 12k.
+
+[OBS] Kernel 12 observes `R2UR UR7, R1` in 12k, followed by runtime-indexed local loads such as `LDL R24, [R37+UR7]`.
+
+[INF] In 12k, `R2UR UR7, R1` enables an addressing form where a per-thread computed offset register is added to a uniform copy of the local-memory base.
+
+[OBS] Kernel 12 observes the runtime-index mask `LOP3.LUT R, R_idx, 0xfc, RZ, 0xc0, !PT` before local-array `LDL` access.
+
+[INF] For the tested `int arr[64]` case, the `0xfc` mask both aligns to 4-byte elements and keeps the indexed byte offset inside the 64-element array range.
+
+**Variants**
+
+[OBS] Kernel 12 observes no spill in 12a, 12b, 12c, and 12d for the simpler 10-accumulator kernel, even with `-maxrregcount=24`; `-maxrregcount=16` is raised by ptxas to the SM120 24-register floor.
+
+[RES] Kernel 12 resolves that ptxas will not allocate fewer than 24 registers per thread for the tested SM120 profile.
+
+[OBS] Kernel 12 observes no spill in 12e for a 16-accumulator loop without a register cap; ptxas uses up to `R34`.
+
+[OBS] Kernel 12 observes no spill in 12f for the same 16-accumulator loop with `-maxrregcount=24`; ptxas restructures the loop body instead.
+
+[INF] In the tested pressure range, ptxas prefers restructuring live ranges before emitting local-memory spill traffic.
+
+[OBS] Kernel 12 observes massive spill in 12i for a 32-accumulator loop with `-maxrregcount=24`: 170+ `STL`/`LDL` pairs and a kernel body around 550 instructions.
+
+[OBS] Kernel 12 observes local-array allocation in 12k for `int arr[64]`: a 0x100-byte frame, `STL.128` vectorized initialization, and runtime-indexed `LDL` reads.
+
+[OBS] Kernel 12 observes no spill in 12j for a `__noinline__` function with 16 float arguments; arguments are passed in registers rather than through a stack argument area.
+
+[HYP] The no-spill local-call behavior may change under separate compilation or `-rdc=true`; Kernel 12 does not test that ABI boundary.
+
+**Interpretation**
+
+[INF] `STL`/`LDL` traffic with `R1` as base identifies per-thread local-memory traffic, not CTA shared-memory traffic.
+
+[INF] A frame allocation plus many interleaved `STL` and `LDL.LU` instructions around arithmetic identifies a register-pressure spill pattern.
+
+[INF] A frame allocation plus `STL.128` burst initialization and runtime-indexed `LDL [R_offset+UR_base]` identifies a source local-array pattern.
+
+[INF] In the observed 12i rolling-window spill, ptxas interleaves local stores and loads with FFMA work rather than batching all spills at region boundaries.
+
+[INF] In the observed 12i pressure case, ptxas preserves the loop unroll and pays local-memory traffic instead of reducing the unroll factor.
+
+[INF] The static cost signal is instruction-count and local-memory traffic expansion. The runtime cost still requires profiling because local memory can hit in cache and because scheduling can hide some latency.
+
+**Anti-patterns**
+
+[INF] The standard `LDC R1, c[0x0][0x37c]` prologue alone is not a spill. It appears even when no local memory is used.
+
+[INF] A local `CALL.REL.NOINC` by itself is not spill evidence; Kernel 12 observes no `STL`/`LDL` around the 16-argument local call in 12j.
+
+[INF] `STS` and `LDS` are shared-memory instructions, not local-memory spill instructions.
+
+[INF] `STL.128` in a local-array initialization should not be interpreted as global or shared vector store traffic.
+
+[INF] `-maxrregcount` alone is not proof of spill; Kernel 12 shows ptxas can ignore ineffective caps, raise too-low caps to 24, or restructure code without spilling.
+
+**Open gaps**
+
+[GAP] Runtime performance cost of the observed spill patterns is not profiled.
+
+[GAP] Frame alignment is only hypothesized from observed 0x100 and 0x128 frame sizes.
+
+[GAP] `LDL.128` is not observed in Kernel 12.
+
+[GAP] Complete `.LU` semantics are not decoded.
+
+[GAP] Separate-compilation call ABI behavior is not tested.
+
+---
+
+### PATTERN-10: Sparse MMA metadata operand channel
+
+**Category**: tensor_core
+**Evidence**: [OBS] Chapter 19 contains the controlled SM120 sparse MMA observations for this pattern; Chapters 23 and 24 contain supporting fragment-layout and production-like contexts where sparse metadata and scale operands appear.
+**Confidence**: [INF] C2 for Chapter 19 controlled sparse MMA opcode, metadata, selector, and scale variants; C3 for Chapter 24 runtime smoke execution of production-like sparse probes; C1 for static recognition in future production dumps unless source mapping, numeric correctness, or profiling is added.
+
+**Plain English**
+
+[INF] Sparse MMA means the tensor-core instruction is told that one input matrix has structured zeros. The instruction therefore needs normal A/B fragments plus a compact metadata value that describes which elements are present.
+
+[INF] In SASS, that metadata is not hidden inside the opcode. It is a visible register operand consumed by sparse `QMMA` or `OMMA` instructions.
+
+[INF] For block-scaled sparse forms, there is also a separate scale operand channel. Metadata tells the tensor core which sparse elements to use; scale values tell it how to rescale low-precision blocks.
+
+[INF] Seeing this pattern identifies a sparse tensor-core compute region. It does not by itself prove that the metadata is numerically correct, that the source matrix satisfies the expected sparsity contract, or that the sparse path is faster than dense compute.
+
+**SASS signature**
+
+[OBS] Chapter 19 observes non-scaled sparse `kind::f8f6f4` lowering to `QMMA.SP.16864.F32.E4M3.E4M3 R4, R4, R16, R20, R0, 0x0`.
+
+[OBS] The non-scaled sparse `QMMA.SP` form uses six visible SASS operands: D base, A base, B base, C base, metadata register, and selector immediate.
+
+[OBS] Chapter 19 observes metadata materialized as a normal register value before the sparse MMA, for example `MOV R0, 0xaaaaaaaa`.
+
+[OBS] Changing metadata constants from `0xaaaaaaaa` to `0x55555555` or `0xffffffff` changes the metadata producer instruction but leaves the tested `QMMA.SP` opcode bytes and control code unchanged.
+
+[INF] Metadata is therefore a runtime register operand at the SASS level for the tested sparse forms, not an opcode field or a control-code field.
+
+[OBS] Sparse non-scaled `kind::f8f6f4` adds the `.SP` mnemonic modifier and uses low opcode byte `0x7a`, the same low byte observed for dense QMMA in Chapters 14 and 15.
+
+[INF] For the tested non-scaled sparse form, `QMMA.SP` remains in the QMMA opcode family rather than becoming a separate sparse-only opcode family.
+
+[OBS] Sparse non-scaled shape is printed as `.16864`, while the related dense QMMA forms in Chapters 14 and 15 are printed as `.16832`.
+
+[INF] For the tested non-scaled sparse QMMA family, the printed sparse K field doubles relative to the dense low-precision QMMA shape while staying in the QMMA opcode family.
+
+[OBS] Chapter 19 observes selector `0x0` as the final immediate operand in accepted sparse non-scaled forms.
+
+[OBS] Chapter 19 observes selector `1` rejected by ptxas for the tested `kind::f8f6f4` warp-level sparse form.
+
+[OBS] Chapter 19 observes sparse block-scaled `kind::mxf8f6f4` lowering to `QMMA.SF.SP`.
+
+[OBS] Chapter 19 observes sparse block-scaled `kind::mxf4nvf4` lowering to `OMMA.SF.SP`.
+
+[OBS] Sparse block-scaled SASS operand order after C is metadata register, scale register, `URZ`, selector immediate.
+
+[INF] The metadata and scale operands should be tracked as separate dependency channels in audits, because Chapter 19 and Chapter 24 show they are loaded or materialized independently before the MMA consumes them.
+
+**Variants**
+
+[OBS] Chapter 19 observes non-scaled sparse `kind::f8f6f4` as `QMMA.SP.16864`.
+
+[OBS] Chapter 19 observes sparse `kind::mxf8f6f4` block-scale forms as `QMMA.SF.SP.16864`.
+
+[OBS] Chapter 19 observes sparse `kind::mxf4nvf4` block-scale forms as `OMMA.SF.SP.168128`.
+
+[RES] Chapter 19 resolves the tested SM120 sparse MMA opcode question at SASS level: non-scaled sparse `kind::f8f6f4` emits `QMMA.SP`, sparse `kind::mxf8f6f4` emits `QMMA.SF.SP`, and sparse `kind::mxf4nvf4` emits `OMMA.SF.SP`.
+
+[RES] Chapter 19 resolves sparse metadata placement at SASS operand level for the tested forms: metadata is an explicit register operand before the selector immediate, or before the scale register in the block-scaled operand tail.
+
+[OBS] Chapter 19 observes 19m as a 16-instruction sparse QMMA chain: the first instruction writes `R12` with C=`RZ`, middle instructions write `R12` with C=`R12`, and B carries `.reuse` until the last instruction.
+
+[INF] This matches the dense QMMA accumulator-chain shape while preserving the extra sparse metadata operand.
+
+[INF] Sparse tensor-core chaining should still be audited with the same accumulator-chain rules as dense QMMA or OMMA, while preserving the extra sparse metadata and scale operands.
+
+[OBS] Chapter 23 observes sparse metadata separation again in fragment-layout probes, including `QMMA.SF.SP.16864.F32.E3M2.E2M1.E8`.
+
+[OBS] Chapter 24 observes production-like sparse probes: 24r emits `QMMA.SP.16864.F32.E4M3.E4M3`, 24s emits `OMMA.SF.SP.168128.F32.E2M1.E2M1.UE4M3.4X`, and 24ab loads sparse metadata with `LDG.E.CONSTANT` before `QMMA.SP`.
+
+**Interpretation**
+
+[INF] A sparse MMA signature is the `.SP` modifier plus the extra metadata operand, not merely a dense `QMMA` or `OMMA` mnemonic in a low-precision kernel.
+
+[INF] In a production dump, a sparse tensor-core region should be read as at least three dependency channels: fragment data, sparse metadata, and, for `.SF.SP`, scale values.
+
+[INF] The metadata producer may be an immediate `MOV` in a controlled microkernel or a memory load such as `LDG.E.CONSTANT` in a production-like kernel; the key audit question is whether that producer reaches the sparse MMA metadata operand.
+
+[INF] `QMMA.SP` and `QMMA.SF.SP` are sparse QMMA-family forms, while `OMMA.SF.SP` is a sparse block-scaled OMMA-family form. They should not be collapsed into one dense MMA bucket during audit.
+
+[INF] The sparse MMA instruction proves that the sparse tensor-core path is selected. It does not prove that the metadata values match the actual packed A/B data, because runtime numeric validation of the sparse metadata patterns remains open.
+
+**Anti-patterns**
+
+[INF] A low-precision dense `QMMA.16832` or `OMMA.SF.16864` without `.SP` is not this sparse metadata pattern.
+
+[INF] A standalone metadata-looking constant such as `0xaaaaaaaa` is not sufficient evidence for sparse MMA unless a later `.SP` instruction consumes it as the metadata operand.
+
+[INF] Scale loads alone are not sparse metadata. Dense block-scaled `OMMA.SF` also uses scale operands without sparse `.SP` metadata.
+
+[INF] The selector immediate is not the metadata value. In the observed non-scaled sparse form, metadata is the register operand before the selector immediate.
+
+[INF] Sparse SASS structure is not a performance claim. Sparse MMA latency, metadata-load overhead, and effective speedup require separate measurement.
+
+**Open gaps**
+
+[GAP] Runtime validity of Chapter 19 metadata patterns `0xaaaaaaaa`, `0x55555555`, and `0xffffffff` is not measured.
+
+[GAP] Sparse QMMA and sparse OMMA latency are not measured.
+
+[GAP] Sparse metadata load overhead in production-like paths is not profiled.
+
+[GAP] Exact bit-level meaning of the sparse `.SP` modifier inside QMMA and OMMA opcode/control fields remains incomplete.
+
+[GAP] Selector semantics across all warp-level sparse MMA families are not fully mapped.
+
+---
+
+### PATTERN-11: Vectorized global memory access
+
+**Category**: memory
+**Evidence**: [OBS] Kernel 08 contains the controlled SM120 vectorized global load/store observations for this pattern; Kernel 24 contains supporting production-like epilogue contexts where `STG.E.128` appears after tensor-core compute.
+**Confidence**: [INF] C2 for Kernel 08 controlled vector-width, scalar-indexing, and alignment variants; C3 for Kernel 24 runtime smoke execution of production-like `STG.E.128` epilogues; C1 for static recognition in future production dumps unless source mapping, runtime validation, or profiling is added.
+
+**Plain English**
+
+[INF] Vectorized global memory access means one SASS load or store moves several adjacent scalar elements at once. For example, `LDG.E.128` moves 16 bytes and fills four 32-bit registers.
+
+[INF] This is a memory-traffic pattern, not a vector arithmetic pattern. Kernel 08 shows `float4 + float4` still becomes four scalar `FADD` instructions; the vectorization is in the global load/store instructions.
+
+[INF] In source-level terms, ptxas needs a vector type or an equivalent aligned reinterpretation to emit the wide global access. Merely writing four adjacent scalar loads is not enough in the tested SM120 cases.
+
+[INF] Seeing this pattern is evidence for wide global-memory transactions and consecutive-register data movement. It does not by itself prove coalescing efficiency, cache behavior, or end-to-end memory bandwidth without runtime profiling.
+
+**SASS signature**
+
+[OBS] Kernel 08 observes scalar 32-bit global loads as `LDG.E`, 64-bit loads as `LDG.E.64`, 128-bit loads as `LDG.E.128`, and 256-bit loads as `LDG.E.ENL2.256`.
+
+[OBS] Kernel 08 observes matching global store forms including `STG.E.128` and `STG.E.ENL2.256`.
+
+[OBS] `LDG.E.128` loads 128 bits into four consecutive registers from a single destination base register.
+
+[OBS] `STG.E.128` stores 128 bits from four consecutive registers from a single source base register.
+
+[OBS] `LDG.E.ENL2.256` loads 256 bits into eight consecutive registers named through two destination base registers in the visible SASS.
+
+[OBS] `STG.E.ENL2.256` mirrors the 256-bit load pattern for global stores.
+
+[OBS] Kernel 08 observes `.ENL2` only at the tested 256-bit width.
+
+[HYP] In Kernel 08, `.ENL2` likely marks an enlarged encoding that uses two register base fields because eight consecutive registers cannot be represented by one visible register base field.
+
+[OBS] Kernel 08 observes the global addressing form `desc[UR_desc][R_addr.64]` for vectorized global loads and stores.
+
+[OBS] Kernel 08 observes the `IMAD.WIDE` stride immediate matching `sizeof(T)`: `0x4` for `float`, `0x8` for `float2`, `0x10` for `float4`, `0x20` for `float8` and `double4_32a`, and `0x40` for `float16`.
+
+**Variants**
+
+[OBS] Kernel 08a `float4` emits `LDG.E.128` and `STG.E.128`.
+
+[OBS] Kernel 08c `float2` emits `LDG.E.64`, filling the width slot between scalar `LDG.E` and `LDG.E.128`.
+
+[OBS] Kernel 08d 32-byte-aligned `float8` emits `LDG.E.ENL2.256` and `STG.E.ENL2.256`.
+
+[OBS] Kernel 08e 64-byte-aligned `float16` emits two 256-bit global loads per array, including a second `LDG.E.ENL2.256` at immediate offset `+0x20`, rather than a wider 512-bit instruction.
+
+[RES] Kernel 08 resolves that the tested SM120 global LDG width caps at 256 bits.
+
+[OBS] Kernel 08f deprecated `double4` emits four `LDG.E.128` operations for the same 32-byte data size where `float8` uses 256-bit loads.
+
+[OBS] Kernel 08g `double4_32a` emits `LDG.E.ENL2.256`, matching the 32-byte-aligned `float8` memory path.
+
+[RES] Kernel 08 resolves that alignment, not element type alone, determines whether the tested 32-byte transfer can use `LDG.E.ENL2.256`.
+
+[OBS] Kernel 08b scalar `float*` manual indexing emits eight scalar `LDG.E` instructions instead of two `LDG.E.128` instructions, despite contiguous aligned scalar accesses.
+
+[RES] Kernel 08 resolves that ptxas does not auto-vectorize the tested scalar contiguous access pattern into wide global loads.
+
+**Interpretation**
+
+[INF] The practical audit signature is the mnemonic width suffix plus consecutive-register operands: `.64`, `.128`, or `.ENL2.256` on `LDG.E`/`STG.E`.
+
+[INF] `LDG.E.128` or `STG.E.128` in an epilogue identifies wide global movement, not necessarily tensor-core output by itself. The surrounding compute and storeback path must be checked separately.
+
+[INF] In production-like GEMM dumps, vectorized `STG.E.128` often belongs to the output epilogue, while tensor-core compute is identified separately through HMMA/QMMA/OMMA patterns.
+
+[INF] A 256-bit global access is a stronger alignment/type signal than a 128-bit access in the tested SM120 corpus, because Kernel 08 only emits `.ENL2.256` when the source type carries a 32-byte alignment guarantee.
+
+[INF] The static instruction width is not the same thing as achieved memory throughput. Runtime coalescing, cache state, occupancy, and address distribution still need profiling.
+
+**Anti-patterns**
+
+[INF] Four adjacent scalar `LDG.E` instructions are not the same as one `LDG.E.128`; Kernel 08b shows ptxas can leave scalar contiguous source code scalar.
+
+[INF] `LDG.E.CONSTANT` is a constant-cache global load path, not this normal vectorized global load pattern unless it also carries a vector width form in the observed SASS.
+
+[INF] `LDS`, `STS`, `LDSM`, `STSM`, `LDGSTS`, `LDL`, and `STL` are different memory spaces or matrix/local-memory families; they should not be collapsed into global `LDG.E`/`STG.E` vectorization.
+
+[INF] `REDG.E.ADD...` is an atomic/reduction global operation, not a normal vectorized `STG.E.128` epilogue store.
+
+[INF] Vectorized memory access does not imply packed arithmetic. Kernel 08 shows vector data still consumed by scalar FP32 or FP64 arithmetic instructions.
+
+**Open gaps**
+
+[GAP] `.ENL2` semantics beyond the observed 256-bit register encoding are not microbenchmarked; cache, ordering, or latency effects remain unknown.
+
+[GAP] Wider global modes such as a hypothetical 512-bit form are not observed in Kernel 08.
+
+[GAP] Cross-architecture stability of the 256-bit `.ENL2` form is not established for SM80, SM86, SM89, SM90a, or SM100a.
+
+[GAP] The effect of `__restrict__` on scalar auto-vectorization is not tested.
+
+[GAP] Runtime throughput and coalescing behavior for each vector width are not profiled.
+
+---
+
+### PATTERN-12: Slowpath arithmetic and MUFU helper lowering
+
+**Category**: arithmetic
+**Evidence**: [OBS] Kernel 11 contains the controlled SM120 division, math-library, MUFU, subnormal-handling, local-CALL, and Payne-Hanek observations for this pattern; Kernel 06 contains supporting external u16 helper-call context; Kernel 12 contains supporting local-CALL-without-spill context.
+**Confidence**: [INF] C2 for Kernel 11 controlled arithmetic-source variants; C1 for static recognition in future production dumps unless source mapping, runtime validation, numeric checking, or profiling is added.
+
+**Plain English**
+
+[INF] Slowpath arithmetic means a simple-looking source operation expands into a larger SASS sequence because the compiler has to handle hard numeric cases: division, subnormal floats, NaN/Inf, large-angle trig reduction, or integer width corner cases.
+
+[INF] MUFU instructions are hardware approximation helpers for functions such as reciprocal, reciprocal square root, log2, and exp2. They are fast building blocks, but ptxas often surrounds them with range checks, scaling, correction arithmetic, or fallback paths.
+
+[INF] A local slowpath is code inside the same SASS function that is reached only for selected input cases. It can appear after the main `EXIT` and be called with `CALL.REL.NOINC`, or it can appear as a branch-controlled inline region.
+
+[INF] Seeing this pattern is evidence for nontrivial compiler-generated arithmetic lowering. It does not by itself prove numerical accuracy, source-level intent, or runtime hotness of the slowpath without runtime inputs and profiling.
+
+**SASS signature**
+
+[OBS] Kernel 11 observes hardware MUFU forms `MUFU.RCP`, `MUFU.LG2`, `MUFU.EX2`, and `MUFU.RSQ`.
+
+[OBS] Kernel 11 observes integer division lowering through a reciprocal-multiply skeleton that includes conversion to float, `MUFU.RCP`, float-to-integer conversion, and integer correction arithmetic.
+
+[OBS] Kernel 11 observes direct intrinsic-style math forms: `__log2f(x)` emits `MUFU.LG2` plus subnormal handling, `rsqrtf(x)` emits `MUFU.RSQ` plus subnormal handling, and `__fdividef(a,b)` emits `MUFU.RCP` plus `FMUL` and subnormal handling.
+
+[OBS] Kernel 11 observes standard math forms that are not just one MUFU: `log2f(x)` emits an inline polynomial, `expf(x)` emits range reduction plus `MUFU.EX2`, `sinf(x)` emits a fast path plus a Payne-Hanek slowpath, and `sqrtf(x)` emits a fast path plus a local slowpath.
+
+[OBS] Kernel 11 observes the canonical FP32 subnormal guard skeleton around MUFU or polynomial work: `FSETP.GEU` against FLT_MIN, predicated multiply by `16777216`, arithmetic work, then predicated correction.
+
+[OBS] Kernel 11 observes local subroutine slowpaths using `CALL.REL.NOINC <local_address>` and `RET.REL.NODEC Rn 0x0`.
+
+[OBS] Kernel 11 observes the caller materializing a return address in a register before local `CALL.REL.NOINC`.
+
+[OBS] Kernel 11 observes local slowpath bodies placed after the main `EXIT` in the same `.text` section.
+
+[OBS] Kernel 11 observes Payne-Hanek large-argument `sinf` reduction using `LDG.E.CONSTANT` table loads, a uniform loop, integer accumulation, FP64 `DMUL`, and `F2F.F32.F64`.
+
+**Variants**
+
+[OBS] Kernel 11a `u32` runtime division is fully inline and has no `CALL`.
+
+[OBS] Kernel 11b `u64` runtime division uses an inline fast path plus `CALL.REL.NOINC 0x2e0` to a local slowpath after the main `EXIT`.
+
+[OBS] Kernel 11c `s32` runtime division uses integer absolute value plus the unsigned division skeleton and sign fix-up.
+
+[OBS] Kernel 11d standard `log2f(x)` emits a fully inline polynomial approximation and no `MUFU.LG2`.
+
+[OBS] Kernel 11e `__log2f(x)` emits `MUFU.LG2` with subnormal handling.
+
+[OBS] Kernel 11f standard `expf(x)` emits range reduction, `MUFU.EX2`, and final scaling, without a local `CALL`.
+
+[OBS] Kernel 11g standard `sinf(x)` emits a fast path for smaller inputs and a branch-controlled Payne-Hanek slowpath for large inputs.
+
+[OBS] Kernel 11h standard `sqrtf(x)` emits `MUFU.RSQ`, one Newton-Raphson refinement in the fast path, and `CALL.REL.NOINC 0x1d0` for edge cases.
+
+[OBS] Kernel 11i `rsqrtf(x)` emits `MUFU.RSQ` with subnormal handling.
+
+[OBS] Kernel 11j `__fdividef(a,b)` emits `MUFU.RCP`, `FMUL`, and subnormal handling on both operands.
+
+[OBS] Kernel 06 observes an external named helper for sub-word modulo, `__cuda_sm20_rem_u16`, while Kernel 11 observes no external named helper for tested u32, u64, s32, or math-library variants.
+
+[INF] In the tested CUDA 13.2 SM120 corpus, ptxas prefers inline lowering or local in-kernel slowpaths for u32-and-wider division and tested math functions, while the observed external helper path is limited to the earlier u16 case.
+
+**Interpretation**
+
+[INF] A MUFU mnemonic by itself identifies an approximate hardware math building block, not the full source-level operation. The surrounding guards, scaling, and correction instructions determine whether it is reciprocal, reciprocal sqrt, log2, exp2, divide, sqrt, or part of a larger standard function.
+
+[INF] A `CALL.REL.NOINC` to a local numeric address inside the same kernel should be treated as a local slowpath candidate, especially when the body is after the main `EXIT` and returns with `RET.REL.NODEC`.
+
+[INF] A `CALL.REL.NOINC` to a named helper such as `__cuda_sm20_rem_u16` is a different shape from the local slowpath pattern and should be audited separately.
+
+[INF] `LDG.E.CONSTANT` inside a uniform counted loop with integer accumulation is a strong signature for a table-driven arithmetic reduction, as observed in the `sinf` Payne-Hanek path.
+
+[INF] Standard C math functions and CUDA intrinsic forms can lower very differently: `log2f` and `__log2f` are distinct in Kernel 11, so audits should not infer source spelling from one mnemonic alone.
+
+[INF] Static SASS can identify the existence and structure of slowpaths, but runtime hotness depends on input values. A large slowpath body may be cold for normal inputs.
+
+**Anti-patterns**
+
+[INF] One `MUFU` instruction is not proof of a complete standard library call; it can be one stage inside a larger inline lowering.
+
+[INF] Absence of an external named helper does not mean arithmetic is cheap. Kernel 11 shows inline division and standard math can still expand into many instructions.
+
+[INF] A local `CALL.REL.NOINC` is not automatically register spilling or stack argument passing; Kernel 12 separately shows local calls can pass many arguments in registers without `STL`/`LDL`.
+
+[INF] `LDG.E.CONSTANT` is not ordinary vectorized global memory access. In the observed arithmetic slowpath it is a read-only table path used for range reduction.
+
+[INF] A body placed after `EXIT` is not necessarily dead code; Kernel 11 shows post-`EXIT` local slowpath bodies reached by `CALL.REL.NOINC`.
+
+**Open gaps**
+
+[GAP] Runtime numeric accuracy of the reconstructed standard math sequences is not independently validated against CUDA library specifications.
+
+[GAP] Runtime frequency and performance cost of local slowpaths are not profiled.
+
+[GAP] Exact derivation of integer-division magic constants and correction bounds is not fully proven from first principles.
+
+[GAP] Exact Payne-Hanek accumulator reconstruction from the observed `sinf` slowpath remains incomplete.
+
+[GAP] Whether the same external-helper versus local-slowpath split holds across CUDA versions and other architectures is not established.
+
+---
+
+### PATTERN-13: Production mini-GEMM audit segmentation
+
+**Category**: audit_method
+**Evidence**: [OBS] Chapter 24 contains the controlled SM120 production-like mini-GEMM audit probes for this pattern; [INF] the prior component patterns provide the classification vocabulary for individual regions.
+**Confidence**: [INF] C2 for Chapter 24 controlled source-to-SASS structure; C3 for Chapter 24 runtime smoke execution of all 30 accepted probes; C1 for static recognition in future production dumps unless source mapping, numeric correctness, profiling, or production-library comparison is added.
+
+**Plain English**
+
+[INF] Production audit segmentation means reading a large SASS kernel as a set of regions instead of as one flat instruction list. A mini-GEMM-like dump can contain copy, wait, shared-load, tensor-core compute, epilogue, reduction, and cold/error regions.
+
+[INF] The purpose of this pattern is not to introduce a new instruction. It tells the auditor how to assemble existing patterns into an end-to-end story without overclaiming what the source code or performance must have been.
+
+[INF] In practical terms, first identify the region boundaries, then classify the instructions inside each region using the narrower patterns: async copy, LDSM, MMA chain, STSM/storeback, vectorized global store, sparse metadata, or slowpath/cold control.
+
+[INF] Seeing a complete pipeline-shaped sequence is evidence for a production-like tensor-core kernel structure. It does not by itself prove full GEMM correctness, source template identity, CUTLASS equivalence, or bandwidth/throughput efficiency.
+
+**SASS signature**
+
+[OBS] Chapter 24 observes production-like async staging regions in 24e, 24f, 24t, and 24x through `LDGSTS`, `LDGDEPBAR`, `DEPBAR.LE`, `BAR`, `LDSM`, MMA, and `STG` appearing together.
+
+[OBS] Chapter 24 observes shared matrix-load regions with `LDSM.16.M88.2` and `LDSM.16.M88.4` feeding HMMA in 24e, 24f, 24g, 24q, 24t, and 24x.
+
+[OBS] Chapter 24 observes tensor-core compute regions spanning dense HMMA, dense QMMA, dense OMMA, sparse QMMA, and sparse OMMA-family forms.
+
+[OBS] Chapter 24 observes shared epilogue regions in 24j and 24k through `STSM.16.M88.4`, synchronization, and global output.
+
+[OBS] Chapter 24 observes global epilogue regions where most variants end in `STG.E.128`.
+
+[OBS] Chapter 24 observes split-K or multi-CTA style reduction separately from normal stores in 24z through `REDG.E.ADD.F32.FTZ.RN.STRONG.GPU`.
+
+[OBS] Chapter 24 observes cold/error-path structure in 24ad through `BSSY.RECONVERGENT`, `BSYNC.RECONVERGENT`, and `BPT.TRAP`.
+
+[OBS] Chapter 24 observes scale-load and metadata-load dependency channels in 24aa and 24ab through parameter `LDG.E.CONSTANT` loads feeding OMMA scale operands and QMMA.SP metadata operands.
+
+**Variants**
+
+[OBS] Variants 24a through 24d isolate minimal tensor-core tiles ending in `STG.E.128`: HMMA, QMMA E4M3, QMMA E2M1, and scaled OMMA FP4.
+
+[OBS] Variant 24e isolates a single-stage async pipeline and 24f isolates a double-buffer async pipeline.
+
+[OBS] Variant 24h isolates accumulator-chain depth with four chained `QMMA.16832.F32.E4M3.E4M3` instructions.
+
+[OBS] Variant 24i is a store-only epilogue baseline with `STG.E.128` and no MMA.
+
+[OBS] Variants 24m and 24n contrast preserved dynamic tile-loop structure with fixed-loop unrolled HMMA structure.
+
+[OBS] Variant 24o isolates predicated guarded HMMA plus `WARPSYNC.ALL`.
+
+[OBS] Variants 24r and 24s isolate sparse tensor-core tiles: `QMMA.SP.16864.F32.E4M3.E4M3` and `OMMA.SF.SP.168128.F32.E2M1.E2M1.UE4M3.4X`.
+
+[OBS] Variant 24u confirms the tested SM120 warp-level mini-GEMM path emits `HMMA` and no `WGMMA` or `TCGEN` mnemonics.
+
+[OBS] Variants 24v, 24w, and 24ac expose uniform-register, descriptor, parameter-load, and nontrivial stride/address arithmetic paths feeding tensor-core work.
+
+[OBS] Variant 24z isolates the reduction epilogue by combining HMMA, `REDG.E.ADD.F32...`, and `STG.E.128`.
+
+[RES] Chapter 24 resolves that a first-pass SM120 mini-GEMM audit should segment the dump into global-to-shared copy, async dependency wait, shared matrix load, tensor-core compute, epilogue, optional reduction, and cold/error paths.
+
+**Interpretation**
+
+[INF] A production audit should classify each region with the most specific existing pattern before making a whole-kernel claim. For example, `LDGSTS` belongs to the async-copy region, `LDSM` to fragment loading, `HMMA/QMMA/OMMA` to tensor-core compute, and `STG.E.128` or `REDG.E.ADD` to the epilogue path.
+
+[INF] `STG.E.128` at the end of a tensor-core probe is an output-store signature, not proof that the preceding compute was numerically correct.
+
+[INF] `REDG.E.ADD...` separates split-K or multi-CTA accumulation from normal vectorized stores and should not be collapsed into the `STG.E.128` epilogue pattern.
+
+[INF] Scale values and sparse metadata must be traced as independent dependency channels from their producers into the MMA operands; they are not interchangeable with A/B fragment data.
+
+[INF] Cold/error paths can coexist with a normal compute pipeline. They should be segmented separately so `BPT.TRAP` or defensive branches do not distort the mainloop interpretation.
+
+[INF] The audit confidence framework matters here: Chapter 24 supports structural recognition and runtime launchability, but not full numeric GEMM correctness or production-library equivalence.
+
+**Anti-patterns**
+
+[INF] A single MMA instruction does not prove a complete GEMM pipeline; it may be an isolated probe, a guarded region, or a partial tile.
+
+[INF] A pipeline-shaped SASS sequence does not prove the exact source loop nest, template specialization, or K-iteration count without source mapping or controlled variants.
+
+[INF] Absence of `WGMMA` or `TCGEN` in the tested SM120 probes should not be generalized to architectures outside the tested consumer Blackwell scope.
+
+[INF] A store-only baseline such as 24i prevents over-reading `STG.E.128`: the store can exist without MMA.
+
+[INF] Runtime smoke execution is not the same as full numeric validation. Chapter 24 intentionally includes structural probes whose output can be zero or incomplete while still validating SASS shape.
+
+**Open gaps**
+
+[GAP] Full numeric GEMM correctness is not claimed by Chapter 24.
+
+[GAP] Production library comparison against CUTLASS, FlashAttention, or vendor kernels remains future Phase 4 work.
+
+[GAP] Full audit-confidence scoring on real production kernels remains future work beyond the mini-GEMM probes.
+
+[GAP] STSM lane-to-shared layout and accumulator storeback semantics are covered separately by Chapter 25 and remain incomplete at the full semantic layout level.
+
+[GAP] Cross-architecture stability of this segmentation grammar is not established beyond the checked SM120/SM120a corpus.
+
+---
+
+### PATTERN-14: Loop back-edge and unroll classification
+
+**Category**: control_flow
+**Evidence**: [OBS] Chapter 20 contains the controlled SM120 loop-lowering, unroll-pragma, dynamic-loop, template-instantiation, and repeated-body probes for this pattern; [OBS] Chapter 18 contains a supporting tensor-core K-loop case with an explicit `#pragma unroll 1` back-edge.
+**Confidence**: [INF] C2 for Chapter 20 controlled source-to-SASS loop and unroll variants; C1 for static recognition in future production dumps unless source mapping, runtime validation, profiling, or compiler-version comparison is added.
+
+**Plain English**
+
+[INF] Loop back-edge classification means deciding whether source-level repetition is still a real loop in SASS or whether ptxas expanded it into straight-line instructions. The visual test is simple: a preserved SASS loop has a branch whose target goes backward to an earlier instruction in the useful body.
+
+[INF] A fully unrolled loop has no useful-body back-edge. Instead, the repeated work appears as repeated static instruction sites: multiple `FFMA`, `FADD`, `HMMA`, stores, or other body instructions laid out in order.
+
+[INF] A partially unrolled loop can show both signals at once: several copies of the body appear before a backward branch. For example, an unroll-by-4 loop has a 4-wide body and then a branch back to the loop header.
+
+[INF] This pattern helps production audits avoid a common mistake: counting source loops rather than SASS sites. The dump tells you what the GPU will execute statically; it does not prove the original source trip count unless source mapping or controlled variants are available.
+
+**SASS signature**
+
+[OBS] Chapter 20 defines a back-edge mechanically as a `BRA` or `BRA.U` whose target offset is lower than the branch instruction offset.
+
+[OBS] Variant 20d observes a preserved constant loop from `#pragma unroll 1` with `BRA.U UP0, 0xe0` at offset `0x0130`.
+
+[OBS] Variant 20n observes a partially unrolled constant loop from `#pragma unroll 4` with a 4-iteration body and a backward `BRA.U UP0, 0xe0` at offset `0x01f0`.
+
+[OBS] Dynamic-loop variants 20c, 20p, and 20q observe multi-path loop structures with three back-edges each.
+
+[OBS] Fully unrolled constant-loop variants 20a, 20b, 20e, 20f, 20g, 20h, 20m, 20s, 20u, and 20v observe no useful-body back-edge.
+
+[OBS] Chapter 20 observes a terminal self-trap `BRA` after `EXIT`.
+
+[RES] That terminal trap branch is not a loop back-edge and must not be counted as useful loop structure.
+
+[OBS] Variant 20k observes `BSSY.RECONVERGENT` and `BSYNC.RECONVERGENT` around a `break`-capable loop body.
+
+[RES] Ordinary preserved loops do not require BSSY/BSYNC in the tested variants.
+
+**Variants**
+
+[OBS] Variants 20a and 20b show default full unroll for constant scalar trip counts 4 and 16.
+
+[OBS] Variants 20e and 20f show default full unroll for nested constant scalar loops with 4 x 2 and 8 x 2 shapes.
+
+[OBS] Variants 20g and 20h show default full unroll for nested constant HMMA loops with 4 x 2 and 8 x 2 shapes; 20h emits 16 visible `HMMA.16816.F32` instructions.
+
+[OBS] Variant 20m shows explicit full unroll matching the default full-unroll shape of 20b.
+
+[OBS] Variant 20o shows a dynamic loop with `#pragma unroll 4` lowering to a 4-wide body plus tail structure and two back-edges.
+
+[OBS] Variants 20i, 20j, and 20l show conditional loop bodies using predicated arithmetic or predicated branches without BSSY/BSYNC.
+
+[OBS] Variant 20r shows a dynamic loop with volatile global stores through `STG.E.STRONG.SYS`.
+
+[OBS] Variant 20t shows that one dump can contain two separate SASS functions for two template instantiations.
+
+[OBS] Variant 20u shows unique per-iteration stores survive as 16 `STG.E` instructions, while 20v shows an identical repeated scalar body remains 16 `FADD` instructions in the tested source.
+
+[RES] Chapter 20 resolves that, in the tested variants, no SASS-level loop without a useful-body back-edge was observed.
+
+**Interpretation**
+
+[INF] In a production dump, first ignore the terminal trap/padding region after `EXIT`, then search useful code for backward `BRA` or `BRA.U` targets.
+
+[INF] If the useful body has no back-edge but contains repeated MMA/arithmetic/store sites, the safe conclusion is full unroll of the visible SASS body, not a hidden loop.
+
+[INF] If the useful body contains repeated sites followed by a back-edge, classify it as partial unroll or a dynamic-loop cascade rather than a single scalar source iteration.
+
+[INF] Dynamic trip counts can produce multi-path cascades instead of one compact loop, so multiple back-edges do not necessarily mean multiple source loops.
+
+[INF] Template instantiations must be audited per SASS function. A source file can produce multiple specialized functions with different static instruction counts.
+
+[INF] BSSY/BSYNC around a loop region is evidence for reconvergence handling around a non-structured or divergent region, not evidence that ordinary loops are encoded through BSSY/BSYNC.
+
+**Anti-patterns**
+
+[INF] Do not count a self-targeting terminal `BRA` after `EXIT` as a loop.
+
+[INF] Do not infer the source trip count from repeated instruction count alone unless the source, template parameters, or controlled variants are available.
+
+[INF] Do not assume a source loop exists just because a dump contains repeated arithmetic or repeated MMA instructions; the loop may be fully unrolled.
+
+[INF] Do not assume absence of a back-edge proves no source loop existed; it proves only that the tested SASS body has no preserved loop in that region.
+
+[INF] Do not treat BSSY/BSYNC as the normal encoding for ordinary loops in the tested SM120 variants.
+
+**Open gaps**
+
+[GAP] Runtime numeric validation of Chapter 20 variants remains blocked by the unavailable NVIDIA driver in that environment.
+
+[GAP] Exact ptxas thresholds and heuristics for choosing full unroll, partial unroll, and dynamic-loop cascades are not fully decoded.
+
+[GAP] The original production FP4 attention 2-QMMA observation remains unresolved without rebuilding and comparing the original source/binary pair.
+
+[GAP] Compiler-version and cross-architecture stability of these loop-lowering heuristics is not established.
+
+---
+
+### PATTERN-15: Template-specialized SASS function separation
+
+**Category**: audit_method
+**Evidence**: [OBS] Chapter 20 contains controlled template-instantiation probes for this pattern, including one-instantiation and two-instantiation dumps.
+**Confidence**: [INF] C2 for Chapter 20 controlled template-instantiation visibility; C1 for static recognition in future production dumps unless source mapping, symbol demangling, build metadata, or compiler-version comparison is added.
+
+**Plain English**
+
+[INF] Template-specialized function separation means that a single CUDA source pattern can appear as more than one compiled SASS function. Each template instantiation, kernel variant, or specialization can have its own function body, instruction count, loop shape, and repeated instruction sites.
+
+[INF] In practical audit terms, the unit of counting is the SASS function body, not the source file and not the whole dump. If a dump contains two `Function :` sections, each section must be classified separately before drawing conclusions about loops, MMA counts, stores, or slowpaths.
+
+[INF] This matters for production kernels because template constants often control tile size, head dimension, dtype, stage count, or epilogue shape. Two specializations from the same source can legitimately produce different SASS without implying that one of them is stale or incorrect.
+
+[INF] Seeing multiple specialized functions is evidence that the binary contains multiple compiled bodies. It does not by itself prove which one was launched, which source template parameters produced it, or which production workload path used it.
+
+**SASS signature**
+
+[OBS] Chapter 20 observes that multiple `Function :` sections in one SASS dump can indicate template specializations or multiple kernels.
+
+[OBS] Variant 20s emits one SASS function for `template_nested_kernel<8,2>` with 64 instructions, no back-edge, 16 `FFMA`, and 16 `FADD`.
+
+[OBS] Variant 20t emits two SASS functions in one dump: `template_nested_kernel<4,2>` and `template_nested_kernel<8,2>`.
+
+[INF] Because the two observed template bodies have different template parameters, audits should not assume they have the same static loop, instruction-count, or repeated-body shape.
+
+[OBS] In Chapter 20, the template-instantiation evidence is separate from runtime launch evidence because runtime numeric validation is blocked in that environment.
+
+**Variants**
+
+[OBS] Variant 20s isolates the single-instantiation case, so the dump has one relevant template-specialized function body for that source form.
+
+[OBS] Variant 20t isolates the multi-instantiation case, so the dump has two relevant template-specialized function bodies generated from one controlled source family.
+
+[OBS] The production-audit gap records an earlier template `<int HEAD_DIM>` case with two visible instantiations, 64 and 128, in the SASS dump.
+
+[RES] Chapter 20 partially resolves the template-specialization visibility gap by showing that controlled template instantiations can be distinguished as separate SASS functions in one dump.
+
+**Interpretation**
+
+[INF] A production audit should first split the dump by `Function :` boundaries, then apply pattern matching inside each function body independently.
+
+[INF] Instruction counts, MMA counts, back-edge counts, spill counts, and epilogue signatures should be reported per function. Aggregating across all functions can mix different specializations and produce misleading totals.
+
+[INF] If two functions come from related template names but have different static shapes, the safe conclusion is that the binary contains multiple specialized bodies. The source-level parameter values require symbol names, demangling, build metadata, or controlled rebuilds.
+
+[INF] A mismatch between expected source repetition and observed MMA count should be triaged against the specific function body that was launched, not against another specialization in the same dump.
+
+[INF] Template specialization can explain why two SASS functions from one source family differ, but it should not be used as a catch-all explanation without matching the function symbol and source/build context.
+
+**Anti-patterns**
+
+[INF] Do not count instructions across multiple `Function :` sections as if they belonged to one kernel body.
+
+[INF] Do not compare an observed MMA count against source loops until the audit has identified the matching SASS function.
+
+[INF] Do not assume the first function in a dump is the launched production path.
+
+[INF] Do not infer exact template parameter values from instruction count alone.
+
+[INF] Do not treat a template-specialized function body as numerically validated just because its SASS shape is recognized.
+
+**Open gaps**
+
+[GAP] Chapter 20 does not prove which function body a production runtime dispatch selected.
+
+[GAP] The effect of production template constants on complete attention/GEMM loop structure remains open until a production-style templated kernel is rebuilt and audited end-to-end.
+
+[GAP] Symbol demangling and source-to-function mapping are not formalized as a complete workflow in this pattern.
+
+[GAP] Compiler-version and cross-architecture stability of template specialization visibility is not established.
+
+---
+
+### PATTERN-16: Predicated bounds, early-exit, and tail-store guard
+
+**Category**: control_flow
+**Evidence**: [OBS] Kernel 01 contains the baseline SM120 bounds-check form; [OBS] Chapter 21 contains controlled early-return, epilogue-bounds, and masked-store tail variants; [OBS] Chapter 25 contains a predicated tail storeback context after STSM.
+**Confidence**: [INF] C2 for Chapter 21 controlled source-shape variants; C1 for static recognition in future production dumps unless source mapping, runtime validation, numeric tail checks, or profiling is added.
+
+**Plain English**
+
+[INF] A predicated bounds or tail guard is the SASS shape used when only some lanes should continue to a store, epilogue, or early return. Instead of always building a full branch/reconvergence region, ptxas can make the sensitive instruction conditional with an `@P` predicate.
+
+[INF] The common baseline is a comparison that sets a predicate, followed by `@P EXIT` for lanes that are out of range. In-bounds lanes fall through into the useful body; out-of-bounds lanes leave the function.
+
+[INF] Tail storeback uses the same idea later in the kernel: the address calculation and/or `STG` can be predicated so only valid output lanes write memory.
+
+[INF] Seeing this pattern identifies guard lowering for bounds, early exits, or tails. It does not by itself prove the source-level bounds expression, runtime branch cost, final output correctness, or that every possible tail case was tested.
+
+**SASS signature**
+
+[OBS] Kernel 01 observes the baseline bounds-check sequence `ISETP.GE.AND P0, PT, R11, UR5, PT` followed by `@P0 EXIT`.
+
+[OBS] Kernel 01 observes this bounds check as predication rather than an explicit `BRA` around the useful body.
+
+[OBS] Kernel 03 observes the same `ISETP` to `@P EXIT` bounds-check shape and records `stall=13` on the predicate producer before the control-flow consumer.
+
+[OBS] Chapter 20 observes standard prologues with bounds `ISETP` and early `@P0 EXIT` across the controlled loop-lowering variants.
+
+[OBS] Chapter 21 variant 21h emits an additional `@P0 EXIT` for lane-dependent early return and no BSSY/BSYNC.
+
+[OBS] Chapter 21 variant 21p emits an additional `@P0 EXIT` for an epilogue bounds check and no BSSY/BSYNC.
+
+[OBS] Chapter 21 variant 21q emits predicated `LDC.64`, predicated `IMAD.WIDE`, predicated `STG.E`, and an additional `@P1 EXIT`, with no BSSY/BSYNC.
+
+[OBS] Chapter 25 variant 25k covers predicated tail storeback after STSM.
+
+**Variants**
+
+[OBS] Baseline elementwise bounds guards appear in the early prologue of Kernel 01 and recur through the basic kernels as `ISETP` feeding `@P EXIT`.
+
+[OBS] Early-return lowering appears in Chapter 21 variant 21h as a second predicated exit inside the useful body.
+
+[OBS] Epilogue-bounds lowering appears in Chapter 21 variant 21p as an additional predicated exit guarding a later output path.
+
+[OBS] Masked-store tail lowering appears in Chapter 21 variant 21q as predicated store setup plus predicated global store.
+
+[OBS] Matrix-store epilogue tail guarding appears in Chapter 25 variant 25k after the STSM/storeback path.
+
+[RES] Chapter 21 resolves that the tested early-exit and masked-store tail forms can lower without visible BSSY/BSYNC.
+
+**Interpretation**
+
+[INF] In a production dump, `ISETP` or another predicate producer followed by `@P EXIT` is a strong first-pass locator for bounds checks, early returns, or tail guards.
+
+[INF] Predicated `STG` and predicated address setup near an epilogue should be read as masked output writeback, not as unconditional global-store behavior.
+
+[INF] A predicated tail guard is narrower than a full divergence/reconvergence region. Unless `BSSY.RECONVERGENT` and `BSYNC.RECONVERGENT` are visible, the safer classification is predicated guard lowering.
+
+[INF] Tail correctness still requires source mapping or runtime/numeric validation. SASS shape alone shows which lanes are guarded, not whether the predicate is the intended one for every edge case.
+
+[INF] Bounds-check prologue guards should be separated from later epilogue/tail guards, because they protect different regions of the function.
+
+**Anti-patterns**
+
+[INF] Do not classify every `@P EXIT` as an error path; it can be normal bounds or tail control.
+
+[INF] Do not classify a predicated `STG` as an unconditional vectorized store.
+
+[INF] Do not infer BSSY/BSYNC-style reconvergence from predicated exits or predicated stores alone.
+
+[INF] Do not claim numeric tail correctness from a visible predicate without checking output values or a source-level reference.
+
+[INF] Do not count the early prologue bounds guard as evidence that later epilogue stores are also tail-safe; later stores need their own predicates or source/runtime evidence.
+
+**Open gaps**
+
+[GAP] Runtime validation of the Chapter 21 early-exit and masked-store variants remains blocked by unavailable driver evidence in that chapter.
+
+[GAP] Predicate producer-to-`EXIT` scheduling cost is not microbenchmarked; the observed large stall remains a control-code/scheduling clue, not a measured latency model.
+
+[GAP] Full numeric validation for predicated epilogue tail cases remains future work.
+
+[GAP] Compiler-version and cross-architecture stability of these predicated guard choices is not established.
+
+---
+
+### PATTERN-17: Scalar shared-memory staging and CTA barrier
+
+**Category**: memory
+**Evidence**: [OBS] Kernel 06 contains the controlled SM120 scalar shared-memory round-trip and multi-buffer variants for this pattern; [OBS] Kernel 07 contains supporting `UMOV 0x400` presence/absence context for shared-memory use.
+**Confidence**: [INF] C2 for Kernel 06 controlled shared-size, block-size, modulo, and multi-buffer variants; C1 for static recognition in future production dumps unless source mapping, runtime validation, bank-conflict profiling, or cross-architecture comparison is added.
+
+**Plain English**
+
+[INF] Scalar shared-memory staging is the ordinary `__shared__` path: a kernel writes per-thread values into shared memory with `STS`, synchronizes the CTA, then reads values back with `LDS`.
+
+[INF] This is different from tensor-core matrix shared-memory instructions. `LDS` and `STS` move ordinary scalar or vector data through shared memory, while `LDSM` and `STSM` move matrix fragments for tensor-core layouts.
+
+[INF] In practical audits, this pattern identifies a block-level shared scratchpad, not just a global-memory cache effect. The key visual shape is shared-base setup, per-thread address formation, `STS`, usually a CTA barrier, then `LDS`.
+
+[INF] Seeing this pattern does not by itself prove bank-conflict behavior, cross-thread correctness, shared-memory occupancy, or whether the barrier placement is optimal.
+
+**SASS signature**
+
+[OBS] Kernel 06 observes shared-base construction with `S2UR UR5, SR_CgaCtaId`, `UMOV UR4, 0x400`, and `ULEA UR4, UR5, UR4, 0x18`.
+
+[OBS] Kernel 06 decodes the printed ULEA expression as `shared_base = (CgaCtaId << 24) + 0x400`.
+
+[OBS] Kernel 06 observes per-thread shared address formation with `LEA R7, R0, UR4, 0x2` for `&smem[tid] = UR4 + tid * 4`.
+
+[OBS] Kernel 06 observes scalar shared writeback as `STS [R7], R2`.
+
+[OBS] Kernel 06 observes `BAR.SYNC.DEFER_BLOCKING 0x0` for the tested `__syncthreads()` point.
+
+[OBS] Kernel 06 observes scalar shared reload as `LDS R7, [R0]` before global storeback.
+
+[OBS] Kernel 06 observes shared-memory accesses using direct `[R]` or mixed `[R+UR]` addressing, unlike global memory's `desc[UR][R.64]` addressing.
+
+[OBS] Kernel 06g observes two shared buffers using one shared-base construction plus `UIADD3 UR5, UPT, UPT, UR4, 0x400, URZ` to derive the second buffer base.
+
+**Variants**
+
+[OBS] Variants 06b, 06e, and 06f keep `UMOV UR4, 0x400` across tested shared sizes 1024 B, 512 B, and 2048 B, and across tested block sizes 256, 128, and 512.
+
+[RES] Kernel 06 rejects the tested hypotheses that `0x400` directly encodes shared size, block size, or launch configuration.
+
+[OBS] Kernel 06g observes `LDS R8, [R6+UR4]` and `LDS R11, [R6+UR5]`. [INF] This uses one per-thread offset with two uniform shared-buffer bases.
+
+[OBS] Kernel 06g observes consecutive shared stores followed by one `BAR.SYNC`. [INF] In that tested source, the single barrier covers the preceding adjacent stores.
+
+[OBS] Kernel 07 observes `0x400` appearing conditionally with the presence of `__shared__` memory in the tested kernels.
+
+**Interpretation**
+
+[INF] `UMOV 0x400` plus `ULEA ..., 0x18` is a strong first-pass locator for scalar shared-memory base setup in the tested SM120 corpus.
+
+[INF] `STS` and `LDS` should be classified as scalar/vector shared-memory traffic, not global memory and not tensor-core matrix memory.
+
+[INF] `BAR.SYNC.DEFER_BLOCKING 0x0` is CTA-level synchronization for the tested `__syncthreads()` path, not warp reconvergence and not a tensor-core dependency wait.
+
+[INF] Multiple shared buffers can be audited by tracing one uniform base plus derived uniform offsets; do not assume every buffer requires a separate full setup sequence.
+
+[INF] The decoded address expression is a SASS-level addressing formula. The architectural meaning of the `0x400` base and `CgaCtaId << 24` mapping remains unresolved.
+
+**Anti-patterns**
+
+[INF] Do not confuse `LDS`/`STS` with `LDSM`/`STSM`; the latter are matrix-fragment instructions with different operand layouts and audit implications.
+
+[INF] Do not treat `[R]` or `[R+UR]` shared-memory addressing as global descriptor addressing.
+
+[INF] Do not infer bank-conflict freedom from the presence of `LDS`, `STS`, or `BAR.SYNC`; profiling or layout analysis is still required.
+
+[INF] Do not generalize the exact `0x400` and shift-24 interpretation to physical shared-memory layout without architectural validation.
+
+[INF] Do not read `BAR.SYNC` as BSSY/BSYNC-style reconvergence; they solve different synchronization problems.
+
+**Open gaps**
+
+[GAP] The exact architectural meaning of `UMOV UR4, 0x400` plus `ULEA` shift 24 remains unresolved beyond the decoded SASS expression.
+
+[GAP] The behavior of `SR_CgaCtaId` in non-cluster kernels remains partially hypothetical.
+
+[GAP] The `.DEFER_BLOCKING` modifier on `BAR.SYNC` is not fully decoded beyond being the observed default form for tested SM120 `__syncthreads()`.
+
+[GAP] Shared-memory bank conflicts, latency, and throughput are not measured by Kernel 06.
+
+[GAP] Cross-architecture stability of the scalar shared-memory setup sequence is not established.
+
+---
+
+### PATTERN-18: Scoreboard grouping and variable-latency waits
+
+**Category**: scheduling
+**Evidence**: [OBS] Kernels 01 and 03 contain the controlled SM120 scoreboard observations for pointer loads, global loads, fixed-latency stalls, and co-consumed memory producers.
+**Confidence**: [INF] C2 for the controlled Kernel 01 and 03 source-to-SASS examples; C1 for static recognition in future production dumps unless control-code parsing, profiling, or latency microbenchmarks are added.
+
+**Plain English**
+
+[INF] Scoreboards are how SASS waits for variable-latency work. A load, special-register read, barrier, MUFU, or other variable-latency instruction can signal a scoreboard when its result is ready; a later consumer waits on that scoreboard instead of relying only on a fixed stall count.
+
+[INF] The key audit question is not just "which instruction loaded the data", but "which scoreboard did it signal, and which later instruction waited for that scoreboard".
+
+[INF] ptxas can group multiple producers onto one scoreboard when they are consumed together, or assign distinct scoreboards when their consumers can proceed independently.
+
+[INF] Seeing this pattern identifies dependency scheduling structure. It does not by itself prove cache latency, memory throughput, occupancy behavior, or whether the chosen grouping is optimal.
+
+**SASS signature**
+
+[OBS] Kernel 03 records six scoreboards available per warp, labeled SB0 through SB5 in the chapter analysis.
+
+[OBS] Kernel 03 records the basic mechanism: an instruction with `SBS=N` signals scoreboard N, and an instruction with `wait={N}` blocks until that scoreboard is clear.
+
+[OBS] Kernel 03 observes fixed-latency operations such as FFMA using stall count in the chapter scheduling model. [INF] For those fixed-latency dependencies, the stall count rather than a scoreboard wait is the local synchronization mechanism described by the chapter.
+
+[OBS] Kernel 03 records `LDG`, `LDS`, `S2R`, `MUFU`, and `BAR` as variable-latency operation classes in the chapter scoreboard model.
+
+[INF] These classes should be audited as scoreboard-coordinated producers when their results feed later consumers.
+
+[OBS] Kernel 01 observes two co-consumed global loads on the same scoreboard: `LDG.E R2, ...` with `SBS=4` and `LDG.E R5, ...` with `SBS=4`, followed by `FADD R9, R2, R5` with `wait={SB4}`.
+
+[OBS] Kernel 03 extends the co-consumed pattern to three global loads on `SB4`, followed by `FFMA R11, R2, R5, R7` with `wait={SB4}`.
+
+[OBS] Kernel 03 observes four pointer/descriptor constant loads using distinct scoreboards: `LDC.64 R2` with `SBS=0`, `LDCU.64 UR4` with `SBS=1`, `LDC.64 R4` with `SBS=2`, and `LDC.64 R6` with `SBS=3`.
+
+[OBS] Kernel 03 observes those distinct pointer-load scoreboards being consumed by downstream address or bounds computations. [INF] The separate scoreboards preserve readiness separately for those downstream computations.
+
+[OBS] Kernel 03 observes `yield` on instructions that wait on scoreboards in the studied dump.
+
+**Variants**
+
+[OBS] Kernel 01 demonstrates two LDG producers grouped on `SB4`, followed by one downstream `FADD` that consumes both loaded values.
+
+[OBS] Kernel 03 demonstrates three LDG producers grouped on `SB4`, followed by one downstream `FFMA` that consumes all three loaded values.
+
+[OBS] Kernel 03 demonstrates separate LDC/LDCU scoreboards before separate downstream `IMAD.WIDE` address computations.
+
+[OBS] Kernel 03 observes address computations interleaved between global-load emissions: `IMAD.WIDE`, `LDG.E`, `IMAD.WIDE`, `LDG.E`, then later consumer wait.
+
+[OBS] Kernel 01 observes global stores as fire-and-forget in the tested elementwise shape, with no downstream readback in the function.
+
+**Interpretation**
+
+[INF] When several loads share the same `SBS` and one later instruction waits on that same scoreboard, the safe local conclusion is that the producers are synchronized as a group for that consumer.
+
+[INF] Distinct scoreboards on nearby constant or pointer loads can indicate that ptxas wants dependent address computations to become ready independently.
+
+[INF] A small stall count on a variable-latency producer is not a full latency model. The scoreboard wait on the consumer is the dependency-correctness mechanism.
+
+[INF] Interleaved address arithmetic between `LDG` instructions is evidence that ptxas is filling the latency window with independent work.
+
+[INF] Yield on a scoreboard wait tells the scheduler it can run another warp if the current warp blocks, but it does not quantify how long the wait will last.
+
+**Anti-patterns**
+
+[INF] Do not infer one scoreboard per load. Kernel 01 and Kernel 03 show co-consumed global loads can share a scoreboard.
+
+[INF] Do not infer that same-scoreboard loads are independent-ready for separate consumers; grouping means the later wait observes the group.
+
+[INF] Do not treat stall count alone as the data-ready mechanism for global loads or other variable-latency producers.
+
+[INF] Do not infer memory latency or bandwidth from the presence of `SBS` and `wait` without profiling or microbenchmark evidence.
+
+[INF] Do not treat a global store with no local consumer as requiring a visible scoreboard wait in the same function.
+
+**Open gaps**
+
+[GAP] The exact control-code bit placement for stall, yield, scoreboard signal, and wait masks remains partially decoded rather than fully mapped.
+
+[GAP] Throughput and latency differences between grouped and distinct scoreboard choices are not measured.
+
+[GAP] Whether the observed six-scoreboard budget is universal across related architectures and compiler versions is not established.
+
+[GAP] The scheduler policy behind choosing grouped versus distinct scoreboards is inferred from local dependency shape, not proven by profiling.
+
+---
+
+### PATTERN-19: Uniform-register dataflow and cross-file transfers
+
+**Category**: register_dataflow
+**Evidence**: [OBS] Kernels 01, 03, 06, 07, 12, 13, and 24 contain controlled SM120 observations for uniform loads, special-register reads, shared-memory base construction, mixed R/UR arithmetic, and cross-file transfers.
+**Confidence**: [INF] C2 for the controlled source-to-SASS cases that distinguish uniform and per-thread values; C1 for static recognition in future production dumps unless a controlled variant proves the source-level cause.
+
+**Plain English**
+
+[INF] Uniform registers are the "one value per warp" register file. If every lane needs the same value, ptxas can place it in `UR` instead of duplicating it in 32 per-thread `R` registers.
+
+[INF] This pattern tells the reader which values ptxas proved uniform: block IDs, scalar kernel arguments, global-memory descriptors, shared-memory bases, clock samples, and some address bases.
+
+[INF] A production audit should follow where values cross between the per-thread and uniform register files. A uniform value can feed per-thread arithmetic directly, but some producer or consumer shapes need an explicit transfer such as `R2UR`, `MOV R, UR`, `S2UR`, or `CS2UR`.
+
+[INF] Seeing this pattern identifies compiler uniformity analysis and register-file placement. It does not by itself prove that an address is warp-uniform at the source level, that the uniform path is faster in the measured kernel, or that the same allocation will hold across compiler versions.
+
+**SASS signature**
+
+[OBS] Kernel 03 documents the two visible register files: per-thread `R0` through `R255` and uniform `UR` registers. [INF] The surrounding examples show ptxas placing values in `UR` when the value is uniform across the warp.
+
+[OBS] Kernels 01 and 03 observe `S2UR UR4, SR_CTAID.X` for `blockIdx.x` and `LDCU` or `LDCU.64` for uniform scalar arguments and global descriptors.
+
+[OBS] Kernel 03 observes mixed-source arithmetic where an instruction reads both register files, including `IMAD R11, R11, UR4, R0`.
+
+[OBS] Kernel 06 observes shared-memory base construction with `S2UR UR5, SR_CgaCtaId`, `UMOV UR4, 0x400`, and `ULEA UR4, UR5, UR4, 0x18`.
+
+[OBS] Kernel 07 observes that `UMOV UR4, 0x400` appears with shared-memory declarations and is absent in the no-shared Kernel 01 control.
+
+[OBS] Kernel 12 observes `R2UR UR7, R1` after stack-pointer adjustment in the local-array spill case.
+
+[OBS] Kernel 13 observes `CS2UR UR6, SR_CLOCKLO` in the HMMA latency timing harness, followed by mixed arithmetic such as `IADD.64 R2, R2, -UR6`.
+
+[OBS] Chapter 10 observes the opposite consumer direction after REDUX: `REDUX.SUM.S32 UR7, R2` produces a uniform result, and downstream per-thread code uses `MOV R9, UR7`.
+
+[OBS] Kernel 24v observes `S2UR`, `LDCU.64`, `IADD.64 R, R, UR`, tensor-core compute, and global storeback in one production-audit probe. [INF] This is the same uniform-dataflow shape appearing inside a tensor-core kernel segment.
+
+**Variants**
+
+[OBS] The observed uniform special-register reads include `S2UR` for launch identifiers such as `SR_CTAID.X` and `SR_CgaCtaId`.
+
+[OBS] Uniform constant-memory loads appear as `LDCU` or `LDCU.64` in the observed examples. [INF] The `U` destination marks values ptxas classified for the uniform register file.
+
+[OBS] The observed uniform-immediate materialization uses `UMOV`, including the shared-memory-addressing constant `0x400` observed in Kernels 06 and 07.
+
+[OBS] Kernel 06 observes `ULEA` in the shared-memory base setup.
+
+[OBS] Cross-file transfers are visible in both directions in the corpus: `R2UR` in Kernel 12 and `MOV R, UR` after REDUX in Chapter 10.
+
+[OBS] Kernel 13 timing probes use `CS2UR` for the start-clock sample. [INF] That is the uniform-register form of the special-register read in the observed timing harness.
+
+**Interpretation**
+
+[INF] `LDCU` and `S2UR` are strong local signs that ptxas proved a value uniform enough to keep it in the uniform register file.
+
+[INF] Mixed `R`/`UR` operands usually mean a per-thread computation is combining a lane-varying component with a warp-uniform base, stride, descriptor, or constant.
+
+[INF] The shared-memory setup sequence is a compact marker that a kernel uses shared memory, but the exact architectural meaning of the `0x400` constant remains unresolved.
+
+[INF] `R2UR` should be treated as a cross-file placement decision. In Kernel 12 the observed use is stack/local addressing; the exact addressing-mode reason remains a hypothesis, not a resolved rule.
+
+[INF] A `MOV R, UR` after a uniform-producing instruction marks the point where a value re-enters per-thread code.
+
+**Anti-patterns**
+
+[INF] Do not assume every kernel argument is loaded into `UR`; ptxas can choose `LDC` when the downstream use is per-thread or when addressing form requires it.
+
+[INF] Do not treat `UR` as a scalar CPU register. It is warp-uniform GPU state and still participates in SASS scheduling, scoreboards, and operand restrictions.
+
+[INF] Do not infer that a source expression was syntactically uniform only because the final SASS uses `UR`; ptxas may have transformed or hoisted the computation.
+
+[INF] Do not promote the exact meaning of `UMOV 0x400` beyond the observed shared-memory marker without additional architecture evidence.
+
+[INF] Do not treat `R2UR` as generally safe or always legal for arbitrary per-thread values; the corpus only observes it in a stack/local-addressing context.
+
+**Open gaps**
+
+[GAP] The exact architectural meaning of the shared-memory `UMOV 0x400` constant is still unresolved.
+
+[GAP] The full instruction set that accepts mixed `R` and `UR` operands is not mapped.
+
+[GAP] The precise compiler rule for choosing `LDC` versus `LDCU` is inferred from observed uniformity, not formally specified.
+
+[GAP] The reason Kernel 12 uses `R2UR` for stack/local addressing remains a hypothesis pending addressing-mode tests.
+
+[GAP] Cross-architecture stability of the observed `UR` register counts and allocation choices is not established.
+
+---
+
+### PATTERN-20: Kernel argument and global descriptor addressing spine
+
+**Category**: memory_addressing
+**Evidence**: [OBS] Kernels 01, 03, 05, 08, and 24 contain controlled SM120 observations for kernel argument loads, global descriptors, address arithmetic, and descriptor-based global memory operations.
+**Confidence**: [INF] C2 for the controlled basics kernels that map simple CUDA pointer expressions to SASS; C1 for static recognition in future production dumps unless source variants or runtime validation prove the exact source-level expression.
+
+**Plain English**
+
+[INF] This pattern is the reusable SASS shape observed when a kernel gets from CUDA kernel arguments to a real global-memory access. The kernel first loads pointer-like arguments from constant memory, builds a per-thread byte address, then uses a uniform global descriptor plus that address to load or store data.
+
+[INF] In source terms, this is the SASS shape behind expressions like `a[i]`, `b[i]`, and `c[i]`, including vector forms such as `float4` where the stride and access width are larger.
+
+[INF] The useful audit move is to separate three roles: the argument pointer loaded from `c[0x0][...]`, the per-thread index-to-byte conversion done by `IMAD.WIDE`, and the descriptor operand `desc[UR][R.64]` used by `LDG`, `STG`, `LDGSTS`, or related global-memory instructions.
+
+[INF] Seeing this pattern identifies global-memory addressing structure. It does not by itself prove coalescing, cache behavior, alignment correctness, aliasing properties, or source-level array type without width, stride, and surrounding evidence.
+
+**SASS signature**
+
+[OBS] Kernel 01 observes the baseline identity and bounds prologue: `LDC R1, c[0x0][0x37c]`, `S2R R0, SR_TID.X`, `S2UR UR4, SR_CTAID.X`, scalar argument loads from `c[0x0]`, index construction with `IMAD`, bounds check with `ISETP`, and `@P0 EXIT`.
+
+[OBS] Kernel 01 observes pointer arguments loaded from constant memory with `LDC.64 R2, c[0x0][0x380]`, `LDC.64 R4, c[0x0][0x388]`, and `LDC.64 R6, c[0x0][0x390]`.
+
+[OBS] Kernel 01 observes the global descriptor loaded as `LDCU.64 UR4, c[0x0][0x358]`.
+
+[OBS] Kernel 01 observes per-thread byte addresses built with `IMAD.WIDE R*, R_index, 0x4, R_pointer` before scalar FP32 global accesses.
+
+[OBS] Kernel 01 observes descriptor-based global accesses in the form `LDG.E R2, desc[UR4][R2.64]`, `LDG.E R5, desc[UR4][R4.64]`, and `STG.E desc[UR4][R6.64], R9`.
+
+[OBS] Kernel 08 observes the vector-width variant: `IMAD.WIDE R*, R_index, 0x10, R_pointer`, `LDG.E.128 ... desc[UR4][R*.64]`, and `STG.E.128 desc[UR4][R*.64], ...` for `float4`-like accesses.
+
+[OBS] Chapter 24 production mini-GEMM probes repeatedly observe the same descriptor form in tensor-core contexts, including `STG.E.128 desc[UR][R.64]`, `LDGSTS.E.LTC128B.128 [R], desc[UR][R.64]`, and `LDG.E.CONSTANT R, desc[UR][R.64]`.
+
+**Variants**
+
+[OBS] The scalar elementwise examples observe `IMAD.WIDE` with an element-size immediate such as `0x4` before scalar `LDG.E` or `STG.E`.
+
+[OBS] The vectorized global-memory examples observe larger stride immediates such as `0x10` and matching wide opcodes such as `LDG.E.128` and `STG.E.128`.
+
+[OBS] Async global-to-shared copies in Chapter 24 use the same descriptor-address source form through `LDGSTS.E.LTC128B.128 [shared], desc[UR][R.64]`.
+
+[OBS] Read-only production probes in Chapter 24 observe `LDG.E.CONSTANT R, desc[UR][R.64]`.
+
+[INF] This is a global descriptor-addressed load form and should not be confused with `LDC`/`LDCU` argument loads from constant memory.
+
+[OBS] Kernel 03 observes independent pointer or descriptor `LDC`/`LDCU` loads assigned distinct scoreboards before downstream `IMAD.WIDE` address computations.
+
+**Interpretation**
+
+[INF] `c[0x0][...]` loads in this pattern are the kernel argument channel, not loads from the user arrays themselves.
+
+[INF] The `desc[UR][R.64]` operand separates the global descriptor in the uniform register file from the lane-varying 64-bit address in the per-thread register file.
+
+[INF] The `IMAD.WIDE` immediate is useful evidence for byte stride. Combined with `LDG/STG` width, it can help identify scalar versus vectorized addressing.
+
+[INF] Distinct scoreboards on nearby pointer loads can allow downstream address computations to proceed independently, while later global data loads may be grouped if they feed one consumer.
+
+[INF] In production tensor-core dumps, this spine often frames the interesting compute region: descriptor-address loads bring data in, tensor-core instructions transform it, and descriptor-address stores write results out.
+
+**Anti-patterns**
+
+[INF] Do not confuse `LDC`/`LDCU` from `c[0x0][...]` with a global data load; those instructions fetch launch parameters, pointers, descriptors, or constants.
+
+[INF] Do not infer array element type from `LDG/STG` alone. Width and stride show bytes moved, while arithmetic and source context are needed for semantic type.
+
+[INF] Do not infer coalescing or alignment correctness only from `LDG.E.128` or `STG.E.128`; alignment assumptions require source, ABI, or runtime evidence.
+
+[INF] Do not assume all global-memory users follow the simple scalar ordering from Kernel 01. Production kernels can defer pointer loads, interleave address arithmetic, use async copies, or use read-only `LDG.E.CONSTANT` paths.
+
+[INF] Do not treat descriptor-based addressing as a complete memory-dependency model; scoreboards, waits, barriers, and cache modifiers still need separate audit.
+
+**Open gaps**
+
+[GAP] The exact descriptor layout loaded by `LDCU.64` is not decoded.
+
+[GAP] Cross-architecture stability of the constant-memory offsets for descriptors and launch parameters is not established.
+
+[GAP] Cache modifier semantics for `LDG.E`, `LDG.E.CONSTANT`, `LDGSTS`, and store variants are not fully profiled.
+
+[GAP] Alignment and coalescing behavior are not proven by this static pattern.
+
+[GAP] The full set of descriptor-addressing forms used by production libraries remains future audit scope.
+
+---
+
+### PATTERN-21: Narrow-fragment operand channels
+
+**Category**: tensor_core
+**Evidence**: [OBS] Chapters 15, 23, and 24 contain controlled SM120 observations for FP4/FP6 dense fragments, LDSM-fed versus direct-register QMMA inputs, scale vectors, sparse metadata, and production-like narrow MMA channels.
+**Confidence**: [INF] C2 for the controlled SASS variants that distinguish dense dtype forms, LDSM-fed paths, direct-register paths, scale-factor operands, and sparse metadata operands; C1 for static recognition in future production dumps unless runtime decode, numeric validation, or source variants prove the exact value layout.
+
+**Plain English**
+
+[INF] Narrow tensor-core operands such as FP4 and FP6 are packed fragments, not ordinary scalar values. A production audit has to track which registers carry fragment data, which registers carry scale factors, and which registers carry sparse metadata.
+
+[INF] This pattern is about operand channels around the MMA instruction. Related `QMMA` or `OMMA` family forms can be fed by shared-memory matrix loads, by direct register setup, by scale-vector operands, or by sparse metadata operands.
+
+[INF] The safe audit question is "which channel does this operand belong to?" before asking what exact lane value it represents. Chapter 23 shows the channel structure clearly, while the exact lane-to-value and bit-packing decode remains open.
+
+[INF] Seeing this pattern identifies narrow-fragment organization around tensor-core compute. It does not by itself prove the numeric interpretation of every packed nibble, the full lane mapping, or correctness of the MMA result.
+
+**SASS signature**
+
+[OBS] Chapter 23 observes dense FP4/FP6 `QMMA.16832` variants for `E2M1.E2M1`, `E3M2.E3M2`, `E2M3.E2M3`, `E3M2.E2M3`, and `E2M3.E3M2`.
+
+[OBS] Chapter 23 observes that variants 23a through 23e share visible instruction word `0x0000000e0408727a`, while dtype selection is visible in the mnemonic and encoded outside the low opcode byte.
+
+[OBS] Chapter 15 observes mixed-FP6 directions `QMMA.16832.F32.E3M2.E2M3` and `QMMA.16832.F32.E2M3.E3M2`, both remaining in the QMMA low-byte family.
+
+[OBS] Chapter 23 observes an LDSM-fed path where `LDSM.16.M88.2 R24, [R0+0x800]` and `LDSM.16.M88.4 R4, [R0]` precede `QMMA.16832.F32.E2M1.E2M1 R8, R4, R24, RZ`.
+
+[OBS] Chapter 23 observes a direct-register path where `QMMA.16832.F32.E2M1.E2M1` appears without preceding LDSM in the probe.
+
+[OBS] Chapter 23 observes a block-scaled dense channel with `QMMA.SF.16832.F32.E4M3.E4M3.E8 R8, R4, R14, RZ, R17, R0, URZ`.
+
+[OBS] Chapter 23 observes an OMMA scale-vector channel with `OMMA.SF.16864.F32.E2M1.E2M1.UE4M3.4X R8, R4, R14, RZ, R19, R19, URZ`.
+
+[OBS] Chapter 23 observes a sparse block-scaled channel with `QMMA.SF.SP.16864.F32.E3M2.E2M1.E8 R12, R4, R8, RZ, R20, R19, URZ, 0x0`.
+
+[OBS] Chapter 24 records that scale and metadata operands survive as visible SASS dependencies in controlled mini-GEMM probes.
+
+[INF] Production audits should therefore trace those channels separately.
+
+**Variants**
+
+[OBS] Dense narrow fragments appear as `QMMA.16832.F32.<A_dtype>.<B_dtype>` without `.SF` or `.SP` in the observed FP4/FP6 dense probes.
+
+[OBS] LDSM-fed narrow fragments have visible shared-memory matrix loads before the QMMA instruction; direct-register probes do not show that LDSM setup.
+
+[OBS] The observed block-scaled dense forms add `.SF` and visible scale operands after the D, A, B, and C operands.
+
+[OBS] The observed sparse block-scaled forms add both `.SF.SP` in the mnemonic and visible metadata or selector operands beyond the scale/data operands.
+
+[OBS] Chapter 23 K-boundary, register-pair-boundary, special-value, and shared-alignment probes compile.
+
+[GAP] Those probes do not fully decode the value mapping.
+
+**Interpretation**
+
+[INF] The practical audit rule is to trace operand channels separately: fragment data registers, scale registers, metadata registers, and accumulator registers should not be collapsed into one generic "MMA operand" bucket.
+
+[INF] LDSM presence indicates a shared-memory fragment supply path; its absence in the direct-register probe means the fragment registers were prepared without visible matrix shared-memory loads in that SASS region.
+
+[INF] Dtype suffixes identify the declared narrow input formats, but not the exact bit position of every lane value inside each source register.
+
+[INF] `.SF` and `.SP` are strong local signs that the instruction consumes extra channels beyond dense fragment data.
+
+[INF] In production dumps, this pattern helps prevent mislabeling scale vectors or sparse metadata as ordinary A/B data fragments.
+
+**Anti-patterns**
+
+[INF] Do not infer full FP4/FP6 lane-to-value layout from the QMMA mnemonic alone.
+
+[INF] Do not treat LDSM-fed and direct-register QMMA paths as equivalent when auditing data provenance; they prove different fragment supply paths.
+
+[INF] Do not collapse scale operands into A/B fragment data. Chapter 23 and Chapter 24 keep scale channels visible in the SASS operand list.
+
+[INF] Do not collapse sparse metadata into fragment data. Sparse forms expose metadata as a separate channel that must be traced independently.
+
+[INF] Do not treat successful compilation or runtime smoke execution as numeric correctness for packed FP4/FP6 layout.
+
+**Open gaps**
+
+[GAP] Full FP4/FP6 lane-to-value mapping remains undecoded from the current runtime outputs.
+
+[GAP] E3M2 and E2M3 exact bit packing within each 32-bit source register remains unresolved.
+
+[GAP] Special-value interpretation for zero, NaN-like, Inf-like, and sign-bit patterns remains unresolved.
+
+[GAP] LDSM-fed QMMA correctness for packed FP4/FP6 values remains structural until outputs are checked against a numeric reference.
+
+[GAP] Cross-architecture stability of the narrow-fragment channel layout is not established.
+
+---
+
+### PATTERN-22: FFMA fusion and arithmetic chain lowering
+
+**Category**: arithmetic
+**Evidence**: [OBS] Kernels 02, 03, and 05 contain controlled SM120 observations for non-fused addition chains, fused multiply-add lowering, and straight-line FFMA chains after compile-time loop unrolling.
+**Confidence**: [INF] C2 for the controlled source-to-SASS cases that distinguish `a+b+1.0f`, `a*b+c`, and fixed-trip-count repeated multiply-add; C1 for static recognition in future production dumps unless source mapping or numeric validation proves the exact expression.
+
+**Plain English**
+
+[INF] FFMA is the SASS instruction for a fused floating-point multiply-add in the observed FP32 cases: it computes `a * b + c` as one operation. When ptxas sees the right source expression shape in the tested kernels, it lowers multiply-add work to one `FFMA` instead of separate multiply and add instructions.
+
+[INF] The key point is that fusion is not the same as "any three-term arithmetic expression". A source expression like `a + b + 1.0f` is still two additions and stays as two `FADD` instructions in the tested kernel, while `a * b + c` becomes one `FFMA`.
+
+[INF] In fixed-trip-count loops, repeated source-level multiply-add steps can become a straight-line chain of `FFMA` instructions after unrolling. That chain shows the recurrence dependency directly in registers.
+
+[INF] Seeing this pattern identifies arithmetic lowering and dependency shape. It does not by itself prove fast-math policy, source-level algebraic equivalence for all edge cases, final numeric correctness, or throughput without additional evidence.
+
+**SASS signature**
+
+[OBS] Kernel 02 observes that `a[i] + b[i] + 1.0f` lowers to two `FADD` instructions rather than one fused instruction.
+
+[OBS] Kernel 02 observes the first `FADD` writing an intermediate to recycled register `R0`, followed by a second `FADD` that adds the immediate `1`.
+
+[OBS] Kernel 03 observes `a[i] * b[i] + c[i]` lowering to `FFMA R11, R2, R5, R7`.
+
+[OBS] Kernel 03 records the FFMA operand order as destination, multiply source A, multiply source B, and addend source C. [INF] In the observed example, `FFMA R11, R2, R5, R7` corresponds to `R2 * R5 + R7`.
+
+[OBS] Kernel 03 observes three co-consumed global-load producers sharing `SB4`, followed by the `FFMA` consumer with `wait={SB4}`.
+
+[OBS] Kernel 05 observes a compile-time fixed loop count lowering to eight straight-line `FFMA` instructions and no backward branch or loop-control machinery.
+
+[OBS] Kernel 05 observes the repeated chain shape `FFMA R0, R0, R9, 0.5` for middle iterations, with the final FFMA writing the store value to `R3`.
+
+**Variants**
+
+[OBS] Non-fused addition chain: Kernel 02 emits `FADD` then `FADD` for `a+b+1.0f`.
+
+[OBS] Single fused expression: Kernel 03 emits one `FFMA` for `a*b+c`.
+
+[OBS] Fixed-count recurrence: Kernel 05 emits a straight-line FFMA chain for eight compile-time iterations of `x = x * 1.001f + 0.5f`.
+
+[OBS] Kernel 05 combines the FFMA chain with a separately materialized multiplier constant in `R9`. [INF] The constant-loading mechanism is a separate pattern from FFMA fusion itself.
+
+**Interpretation**
+
+[INF] A single `FFMA` with three source operands is evidence for multiply-add lowering, not merely an add chain.
+
+[INF] Two adjacent `FADD` instructions can be the correct lowering for a three-term addition expression; their presence is evidence that the source did not match the multiply-add template in the tested case.
+
+[INF] Consecutive FFMA instructions that feed the previous destination back as the next multiplicand identify a serial arithmetic recurrence or unrolled loop body.
+
+[INF] When an FFMA waits on a scoreboard shared by several loads, the arithmetic instruction is also the point where the loaded operands become jointly consumed.
+
+[INF] Register reuse inside this pattern should be audited separately from arithmetic fusion, because ptxas may recycle dead registers for intermediates.
+
+**Anti-patterns**
+
+[INF] Do not infer FFMA fusion from "three values are involved" unless the SASS actually contains `FFMA` or equivalent fused arithmetic.
+
+[INF] Do not treat two `FADD` instructions as missed optimization by default. Kernel 02 shows two `FADD`s are the expected result for `a+b+1.0f` in the controlled case.
+
+[INF] Do not infer a source loop from a straight-line FFMA chain alone. The same SASS shape could come from explicit repeated source statements or unrolled code.
+
+[INF] Do not use the presence of `FFMA` alone as a performance claim. Dependency depth, issue throughput, register pressure, load waits, and scheduling still need separate evidence.
+
+[INF] Do not fold constant materialization into this pattern. `HFMA2` constant loading before an FFMA chain is related arithmetic setup, but it has its own evidence and gaps.
+
+**Open gaps**
+
+[GAP] Fast-math, contraction flags, and source-level controls over FFMA fusion are not exhaustively tested.
+
+[GAP] Denormal, rounding, NaN, and signed-zero behavior are not validated for the fused versus non-fused cases.
+
+[GAP] Throughput of independent FFMA streams is not measured by these controlled kernels.
+
+[GAP] Cross-architecture stability of the exact fusion and scheduling choices is not established.
+
+[GAP] Interaction with compiler flags, PTX-level `fma.rn`, and explicit no-contraction source patterns remains future work.
+
+---
+
+### PATTERN-23: Register lifetime recycling and semantic role changes
+
+**Category**: register_allocation
+**Evidence**: [OBS] Kernels 02, 05, 12, 13, and 17 contain controlled SM120 observations for dead-register recycling, context-dependent register allocation, register role changes, and zero-copy operand placement.
+**Confidence**: [INF] C2 for the controlled source-to-SASS examples where a visible register changes role after its previous value is dead; C1 for static recognition in future production dumps unless source mapping or liveness tracing proves the previous role is no longer live.
+
+**Plain English**
+
+[INF] A SASS register name is a physical storage location in the compiled kernel, not a permanent source-level variable name. Once the old value is dead, ptxas can reuse that register for a completely different purpose.
+
+[INF] This pattern explains why `R0` might mean `threadIdx.x` early in a function and later become a floating-point scratch register, or why a pointer register can later hold a store value or address for a different array.
+
+[INF] The practical audit rule is to track live ranges, not semantic labels. A register's meaning is bounded by its producers and consumers; after the last consumer, the same register can safely be reassigned.
+
+[INF] Seeing this pattern identifies register allocation and liveness behavior. It does not by itself prove the original source variable, absence of bugs, register pressure, or performance optimality.
+
+**SASS signature**
+
+[OBS] Kernel 02 observes `R0` first holding `threadIdx.x` from `S2R R0, SR_TID.X`, then later being reused as the destination of `FADD R0, R2, R5` after the index computation has consumed the thread ID.
+
+[OBS] Kernel 02 observes the second `FADD` consuming that recycled `R0` and writing the final value to `R9`.
+
+[OBS] Kernel 05 observes a chain where most FFMA instructions write the recurrence through `R0`, but the final FFMA writes the store value to `R3`.
+
+[OBS] Kernel 05 records that `R3` was previously the high half of the source pointer pair `R2:R3` before the source `LDG`; after that load, the pointer value is no longer needed in the observed code.
+
+[OBS] Chapter 13 observes register recycling across semantic boundaries in 13d: `R4` first holds `&b[tid*2]`, then after the `b` loads complete, ptxas overwrites `R4` to become `&d[tid*4]`.
+
+[OBS] Kernel 12 records register-file reuse and loop restructuring in its anti-spill discussion. [INF] Those are compiler strategies used before local-memory spill becomes necessary in the observed pressure cases.
+
+[OBS] Chapter 17 observes LDSM destination register bases also appearing as the consuming HMMA source register bases. [INF] This is a zero-copy operand placement pattern in that observed LDSM-to-HMMA handoff.
+
+**Variants**
+
+[OBS] Arithmetic scratch reuse: Kernel 02 reuses dead `R0` for an intermediate `FADD`.
+
+[OBS] Chain-exit register change: Kernel 05 writes the last FFMA result to a different dead register before `STG`.
+
+[OBS] Address role reuse: Chapter 13 reuses an address register for a later unrelated address.
+
+[OBS] Operand-placement reuse: Chapter 17 places LDSM outputs directly where HMMA reads them.
+
+[OBS] Spill-avoidance context: Kernel 12 records register-file reuse and loop restructuring in the pressure discussion. [INF] In that chapter, these are treated as alternatives ptxas uses before relying on local-memory spill.
+
+**Interpretation**
+
+[INF] When a register appears to change meaning, the first audit step is to find the last consumer of the old value and the producer of the new value.
+
+[INF] Register role changes are expected in optimized SASS and are not evidence of source-level aliasing or incorrect code by themselves.
+
+[INF] Register allocation is global enough that a small source change can affect register names in nearby or downstream code.
+
+[INF] In tensor-core kernels, register placement can also be a dependency optimization: placing LDSM output where HMMA expects its source avoids intermediate moves.
+
+[INF] A register name is reliable only within a live range. Audits should annotate values as `R4 as pointer`, `R4 as fragment`, or `R4 as store address` rather than assigning one meaning for the whole function.
+
+**Anti-patterns**
+
+[INF] Do not assume `R0` always means `threadIdx.x` just because it was produced by `S2R` earlier.
+
+[INF] Do not track source variables by register name alone across the whole function.
+
+[INF] Do not classify a register overwrite as a clobber unless the old value has a later visible consumer.
+
+[INF] Do not infer increased register pressure from an extra temporary if the temporary reuses a dead register.
+
+[INF] Do not treat zero-copy operand placement as proof of value layout correctness; it is register allocation evidence, not numeric validation.
+
+**Open gaps**
+
+[GAP] The exact ptxas allocation heuristic for choosing one dead register over another is not modeled.
+
+[GAP] Cross-kernel register name stability is not guaranteed and is not established beyond controlled examples.
+
+[GAP] The interaction between register recycling, reuse-cache hints, and scoreboard scheduling is not fully decoded.
+
+[GAP] Register allocation behavior under different optimization levels or compiler versions is not tested.
+
+[GAP] Full automated live-range reconstruction from SASS remains future tooling work.
+
+---
+
+### PATTERN-24: FP32 constant materialization and immediate-slot pressure
+
+**Category**: arithmetic
+**Evidence**: [OBS] Kernels 04, 05, 09, 10, and 11 contain SM120 observations for `HFMA2` constant loading, `MOV` immediate loading, FFMA addend immediates, identity constants, and math-helper polynomial constants.
+**Confidence**: [INF] C2 for Kernel 05 controlled constant variants; C1 for static recognition in future dumps unless source mapping or bit-level output checks prove the exact intended constant.
+
+**Plain English**
+
+[INF] Constants in SASS are not always loaded with `MOV`. Ptxas can materialize a 32-bit value by using an instruction that looks like arithmetic, especially `HFMA2` with zero multiply inputs and two FP16 immediates.
+
+[INF] The trick works because two 16-bit half-precision results can be packed into one 32-bit register. That 32-bit bit pattern can later be consumed as an FP32 value by `FFMA` or another instruction.
+
+[INF] This pattern matters because FFMA has limited immediate placement in the observed kernels: the addend can appear as an immediate, while multiplier constants are materialized into registers first.
+
+[INF] Seeing this pattern identifies constant setup, not real half-precision computation. It does not by itself prove the compiler heuristic, throughput benefit, or numeric intent without checking the downstream consumer.
+
+**SASS signature**
+
+[OBS] Kernel 04 observes `HFMA2 R2, -RZ, RZ, 1.875, 0.00931549072265625` before FFMA chains that use `R2` as an operand. [INF] The chapter explains this as materializing the FP32 bit pattern for `1.001f`.
+
+[OBS] Kernel 05 observes `HFMA2 R9, -RZ, RZ, 1.875, 0.00931549` before eight FFMA instructions that use `R9` as the multiplier operand.
+
+[OBS] Kernel 05 tests six multiplier-constant variants and observes `HFMA2` materialization for all six, with FP16 immediate halves changing to match the target FP32 bit pattern.
+
+[OBS] Kernel 05 observes `0.5` encoded directly as the FFMA addend immediate in `FFMA R*, R*, R9, 0.5`.
+
+[OBS] Kernel 05 observes that `0.5f` used as a multiplier is still materialized through `HFMA2`, while `0.5` used as the addend is immediate-encoded in FFMA.
+
+[OBS] Chapter 10 observes reduction identity constants loaded with either `HFMA2` or `MOV` depending on the identity value.
+
+[OBS] Chapter 11 observes FP edge values and polynomial constants in math-helper paths, including immediate `+INF` or `-INF` operands and `HFMA2` packed constants consumed by later arithmetic.
+
+**Variants**
+
+[OBS] Packed FP32 constant via HFMA2: `HFMA2 R, -RZ, RZ, half_hi, half_lo`.
+
+[OBS] Plain immediate materialization: `MOV R, 0x...` appears for constants that ptxas does not choose to encode through HFMA2 in the observed contexts.
+
+[OBS] FFMA addend immediate: Kernel 05 uses an immediate in the `src3` addend slot.
+
+[OBS] Identity setup: Chapters 09 and 10 observe HFMA2 for identities representable through packed-half bit patterns and MOV for identities such as `0x7fffffff` or `0xffffffff`.
+
+[OBS] Math-helper constants: Chapter 11 observes constants embedded in slowpath arithmetic and polynomial reconstruction code.
+
+**Interpretation**
+
+[INF] `HFMA2` with `-RZ` and `RZ` operands can be a bit-pattern constant load rather than meaningful FP16 math.
+
+[INF] The downstream consumer determines how to interpret the produced bits. A register produced by HFMA2 can be read later as FP32, integer bits, or another packed representation depending on the consuming instruction.
+
+[INF] In the Kernel 05 FFMA variants, multiplier constants must be in registers in the observed SASS, while the addend constant can be an immediate.
+
+[INF] Constant materialization cost can be amortized when one materialized register feeds many later uses.
+
+[INF] Different constant-loading choices can reflect scheduling and encoding heuristics, not source-level intent.
+
+**Anti-patterns**
+
+[INF] Do not treat every `HFMA2` as productive half-precision arithmetic; first check whether both multiply operands are zero-like and whether a later instruction consumes the bit pattern as another type.
+
+[INF] Do not assume a numeric-looking FP16 immediate is the source-level constant. In this pattern, the two FP16 immediates are pieces of a 32-bit payload.
+
+[INF] Do not infer that all constants are free immediates. Kernel 05 shows multiplier constants paying a materialization instruction in the observed FFMA shape.
+
+[INF] Do not infer pipeline benefit from HFMA2 materialization without a benchmark; the reason for choosing HFMA2 over MOV remains partly heuristic.
+
+[INF] Do not collapse kernel-argument constants loaded by `LDC` with literal materialization through `HFMA2` or `MOV`; they are different channels.
+
+**Open gaps**
+
+[GAP] The exact ptxas heuristic for choosing `HFMA2`, `MOV`, `IMAD`, or another materialization form is not modeled.
+
+[GAP] Whether FFMA can use immediates in multiplier source slots in any other SM120 context remains unproven.
+
+[GAP] Throughput and scheduling impact of HFMA2 versus MOV constant loading are not microbenchmarked.
+
+[GAP] Cross-architecture stability of the HFMA2 materialization idiom is not established.
+
+[GAP] Compiler-flag and CUDA-version sensitivity of the materialization heuristic remains open.
+
+---
+
+### PATTERN-25: Warp shuffle, vote, match, and sync primitives
+
+**Category**: collective
+**Evidence**: [OBS] Chapters 09 and 21 contain controlled SM120 observations for non-reduction warp collectives: `SHFL.IDX`, `SHFL.UP`, `SHFL.DOWN`, `VOTE`, `MATCH`, `__activemask`, `__syncwarp`, and `WARPSYNC.ALL`.
+**Confidence**: [INF] C2 for the controlled Chapter 09 and 21 source-to-SASS variants; C1 for static recognition in future dumps unless runtime masks, divergence behavior, or source mapping are validated.
+
+**Plain English**
+
+[INF] Warp collectives are instructions where lanes in the same warp communicate or agree on a predicate. They are not all reductions: some broadcast a value, shift values between lanes, compute a ballot mask, find lanes with matching values, or synchronize guarded warp-level work.
+
+[INF] This pattern tells the reader which kind of warp-level communication is present. `SHFL` moves register values between lanes, `VOTE` aggregates predicates, `MATCH` builds masks of lanes with equal values, and `WARPSYNC.ALL` marks explicit warp synchronization in observed guarded tensor-core code.
+
+[INF] Seeing one of these instructions identifies warp-level coordination. It does not by itself prove a reduction, full-mask correctness, safe behavior under arbitrary divergence, or the original CUDA intrinsic without surrounding evidence.
+
+**SASS signature**
+
+[OBS] Chapter 09 observes four SHFL variants on SM120: `SHFL.IDX`, `SHFL.BFLY`, `SHFL.UP`, and `SHFL.DOWN`.
+
+[OBS] Chapter 09 observes `SHFL.IDX` for lane broadcast, with format `Pdst, Rdst, Rsrc, lane_source, 0x1f`.
+
+[OBS] Chapter 09 observes `SHFL.UP PT, R9, R2, 0x4, RZ`; the fifth operand is `RZ` in the observed UP form.
+
+[OBS] Chapter 09 observes `SHFL.DOWN PT, R9, R2, 0x4, 0x1f`; the fifth operand matches the segment-mask form used by IDX and BFLY in the observed dumps.
+
+[OBS] Chapter 09 observes 64-bit shuffle lowering as two `SHFL.IDX` instructions, one per 32-bit half.
+
+[OBS] Chapter 09 observes register-output ballot form `VOTE.ANY R5, PT, P0`.
+
+[OBS] Chapter 09 observes `__activemask()` as `VOTE.ANY R5, PT, PT`.
+
+[OBS] Chapter 09 observes `MATCH.ANY R0, R2` and `MATCH.ALL PT, R5, R2`.
+
+[OBS] Chapter 21 observes `VOTE.ANY R5, PT, P0` for `__ballot_sync`, `VOTE.ANY P0, P0` before a branch guarding `SHFL.IDX`, and `@P0 WARPSYNC.ALL` before `@P0 HMMA.16816.F32`.
+
+**Variants**
+
+[OBS] Broadcast: `SHFL.IDX` moves a value from a selected lane to other lanes.
+
+[OBS] Directional exchange: `SHFL.UP` and `SHFL.DOWN` move values from neighboring lanes by a delta.
+
+[OBS] Butterfly exchange: `SHFL.BFLY` exchanges values by XOR masks and is also used inside manual reduction patterns.
+
+[OBS] Predicate aggregation: `VOTE.ANY` and `VOTE.ALL` appear in predicate or register-output forms depending on whether the source operation needs a boolean or a ballot mask.
+
+[OBS] Equality grouping: `MATCH.ANY` and `MATCH.ALL` produce lane masks for matching values, with `MATCH.ALL` also producing a predicate in the observed form.
+
+[OBS] Sync helper lowering: Chapter 09 observes `__syncwarp()` lowering to NOP padding or elimination in tested forms, while Chapter 21 later observes explicit `WARPSYNC.ALL` in guarded HMMA code.
+
+**Interpretation**
+
+[INF] A lone `SHFL.IDX`, `SHFL.UP`, or `SHFL.DOWN` identifies value movement, not a reduction, unless a repeated combine chain follows.
+
+[INF] `VOTE.ANY R, PT, P` is a ballot-style register mask, while `VOTE.ANY P, P` is a predicate-output form in the observed Chapter 21 branch pattern.
+
+[INF] `VOTE.ANY R, PT, PT` is the observed `__activemask()` idiom because the predicate input is always true.
+
+[INF] Two adjacent SHFLs over neighboring registers can indicate a 64-bit warp value transfer split into two 32-bit halves.
+
+[INF] `WARPSYNC.ALL` should be read as explicit warp-level synchronization/control evidence, not as a reduction signature.
+
+**Anti-patterns**
+
+[INF] Do not classify every SHFL as a warp reduction. Reductions require a repeated exchange plus arithmetic/logical combine chain or a `REDUX`.
+
+[INF] Do not assume `__syncwarp()` always emits `WARPSYNC.ALL`; Chapter 09 observed NOP padding or elimination, while Chapter 21 observed `WARPSYNC.ALL` in a different guarded-HMMA context.
+
+[INF] Do not infer non-full mask behavior from full-mask SHFL/VOTE examples.
+
+[INF] Do not treat MATCH masks as sparse MMA metadata or reduction masks; they are warp-lane equality masks in the observed collectives.
+
+[INF] Do not infer correctness under genuine divergent control without checking the surrounding reconvergence, vote-converged branch, or `WARPSYNC` context.
+
+**Open gaps**
+
+[GAP] Full SHFL/VOTE/MATCH control-code bit placement is not decoded.
+
+[GAP] SHFL.UP fifth-operand semantics are not fully explained beyond the observed `RZ` form.
+
+[GAP] Runtime behavior under non-full masks and genuine divergence remains under-tested.
+
+[GAP] `WARPSYNC.ALL` predicate behavior, encoding, and interaction with SHFL/LDSM/HMMA remain incomplete.
+
+[GAP] Cross-architecture stability of these collective forms is not established.
+
+---
+
+### PATTERN-26: Local CALL and helper ABI shape
+
+**Category**: call_abi
+**Evidence**: [OBS] Chapters 06, 11, 12, and 21 contain controlled SM120 observations for named helper calls, local slowpath calls, manual return-address setup, register argument passing, and divergent noinline calls.
+**Confidence**: [INF] C2 for the controlled same-compilation-unit examples; C1 for future dump recognition unless separate compilation, callee ownership, and runtime control flow are validated.
+
+**Plain English**
+
+[INF] A SASS `CALL` is a visible control-flow transfer to helper code, but in the observed SM120 same-compilation-unit cases it does not look like a conventional stack-based CPU call. The caller writes a return address into a normal register, executes `CALL.REL.NOINC`, and the callee returns with `RET.REL.NODEC` using that register.
+
+[INF] This pattern explains the call frame shape itself. A call target may be a named external helper such as `__cuda_sm20_rem_u16`, a local hex-address slowpath placed after the main `EXIT`, or a noinline local function body selected by ptxas.
+
+[INF] Seeing this pattern identifies out-of-line helper control flow. It does not by itself prove a source-level function boundary, stack spilling, an external library call, or the ABI used by separate compilation.
+
+**SASS signature**
+
+[OBS] Chapter 06 observes runtime modulo lowering to `CALL.REL.NOINC __cuda_sm20_rem_u16`.
+
+[OBS] Chapter 06 observes the u16 helper ABI using `R8` as the dividend input, `R9` as divisor input and remainder output, and a caller-selected return-address register such as `R7` or `R10`.
+
+[OBS] Chapter 06 observes u16 argument masking with `LOP3.LUT` before the helper call.
+
+[OBS] Chapter 11 observes local slowpath calls with `BSSY.RECONVERGENT`, a predicate or branch selecting the slowpath, `CALL.REL.NOINC <hex_address>`, `BSYNC.RECONVERGENT`, and a slowpath body placed after the main kernel `EXIT`.
+
+[OBS] Chapter 11 observes the u64 division slowpath setup `MOV R4, 0x290` before `CALL.REL.NOINC 0x2e0`, with the slowpath returning through `RET.REL.NODEC R4 0x0`.
+
+[OBS] Chapter 11 observes the sqrtf slowpath using the same local-call structure with a caller-written return address, `CALL.REL.NOINC`, and `RET.REL.NODEC`.
+
+[OBS] Chapter 12 observes Kernel 12j setting `MOV R12, 0x1d0` before `CALL.REL.NOINC 0x220`.
+
+[OBS] Chapter 12 observes Kernel 12j passing 16 float arguments entirely in registers and reports no `STL` or `LDL` for argument passing.
+
+[OBS] Chapter 21 observes a divergent noinline local call using `BSSY.RECONVERGENT B0, 0x170`, `CALL.REL.NOINC 0x1b0`, `BSYNC.RECONVERGENT B0`, and a local callee ending in `RET.REL.NODEC R2 0x0`.
+
+**Variants**
+
+[OBS] Named helper call: Chapter 06 uses `CALL.REL.NOINC __cuda_sm20_rem_u16` for runtime u16 modulo.
+
+[OBS] Local arithmetic slowpath: Chapter 11 uses hex-address `CALL.REL.NOINC` targets for rare division or math-library cases.
+
+[OBS] Local noinline call: Chapters 12 and 21 observe local callee bodies selected by ptxas from source shape, with register-passed inputs.
+
+[OBS] Divergent guarded call: Chapters 11 and 21 place local calls inside `BSSY`/`BSYNC` reconvergence structure when only some lanes may need the callee.
+
+**Interpretation**
+
+[INF] The strongest signature is the return-address `MOV` immediately before a `CALL.REL.NOINC`, paired with a callee-side `RET.REL.NODEC` that consumes the selected register.
+
+[INF] The `.NOINC` and `.NODEC` suffixes are consistent with the observed calls avoiding visible stack pointer increment/decrement in these same-compilation-unit cases.
+
+[INF] A hex-address `CALL.REL.NOINC` is best read as a local subroutine or slowpath until a symbol, relocation, or separate object boundary proves otherwise.
+
+[INF] The Chapter 12 16-argument noinline case shows that a local call can still be register allocated globally by ptxas; the call is not spill evidence by itself.
+
+[INF] The chosen return-address register is local to the compiled shape. Chapters 06, 11, 12, and 21 show different registers, so future audits should identify it from the nearby `MOV` and `RET` rather than hard-code one ABI register.
+
+**Anti-patterns**
+
+[INF] Do not treat every `CALL` as a stack frame, spill, or caller-saved register boundary.
+
+[INF] Do not treat every hex-address call as an external library call; Chapter 11 uses local slowpaths with numeric targets.
+
+[INF] Do not assume absence of `CALL` means absence of slowpath work; Chapter 11 also contains inline branch slowpaths and MUFU-based lowering.
+
+[INF] Do not infer the separate-compilation ABI from same-compilation-unit local calls.
+
+[INF] Do not classify a named runtime helper and a local noinline callee as the same evidence class; their control-flow shape may match while ownership and ABI guarantees differ.
+
+**Open gaps**
+
+[GAP] Separate compilation and `-rdc=true` behavior are not tested.
+
+[GAP] CALL/RET latency and scoreboard behavior are not measured.
+
+[GAP] The ptxas threshold for choosing local CALL versus inline slowpath versus named helper remains unknown.
+
+[GAP] Return-address register selection is observed but not modeled.
+
+[GAP] Cross-architecture stability of `CALL.REL.NOINC` and `RET.REL.NODEC` forms is not established.
+
+---
+
+### PATTERN-27: Read-only global constant-cache load path
+
+**Category**: memory
+**Evidence**: [OBS] Chapters 11, 15, 19, 20, 24, and 25 contain controlled SM120 observations of `LDG.E.CONSTANT` in math table access, tensor operand loads, sparse metadata loads, scale loads, and runtime layout/epilogue reads.
+**Confidence**: [INF] C2 for recognizing the instruction form and separating it from `LDC`/`LDCU`; C1 for inferring source qualifiers, cache behavior, or algorithmic role without producer/consumer context.
+
+**Plain English**
+
+[INF] `LDG.E.CONSTANT` is a global memory load using the read-only/constant-cache path. In plain terms, it means the data is being fetched through a read-only global-load route, not from the kernel argument constant bank.
+
+[INF] This pattern is useful because the same instruction form appears in very different roles: a trig lookup table, tensor input fragments, sparse metadata, scale vectors, and runtime layout data. The opcode tells you the memory path, while the surrounding consumers tell you what the value means.
+
+[INF] Seeing `LDG.E.CONSTANT` identifies read-only global dataflow. It does not by itself prove the source was a `__constant__` symbol, a Payne-Hanek table, a tensor operand, or a compiler-guaranteed invariant pointer.
+
+**SASS signature**
+
+[OBS] Chapter 11 observes `LDG.E.CONSTANT R10, desc[UR6][R6.64]` inside the large-argument `sinf` Payne-Hanek slowpath.
+
+[OBS] Chapter 11 documents `.CONSTANT` as an `LDG.E` modifier and distinguishes it from `LDC` and `LDCU`.
+
+[OBS] Chapter 15 observes narrow-fragment probes using `LDG.E.CONSTANT` loads for operand fragments before low-precision MMA instructions.
+
+[OBS] Chapter 19 sparse MMA dumps repeatedly observe `LDG.E.CONSTANT R, desc[UR4][R.64+offset]` forms feeding dense operand fragments and sparse metadata channels.
+
+[OBS] Chapter 20 control-flow probes include `LDG.E.CONSTANT` in loop, branch, and template-specialized tensor-core kernels.
+
+[OBS] Chapter 24 production mini-GEMM probes observe `LDG.E.CONSTANT R, desc[UR][R.64]` for parameter, scale, and metadata load channels.
+
+[OBS] Chapter 25 STSM epilogue probes observe many `LDG.E.CONSTANT` loads for runtime layout and storeback data feeding later matrix-store or global-store paths.
+
+**Variants**
+
+[OBS] Table lookup: Chapter 11 uses `LDG.E.CONSTANT` in a counted integer loop that reads chunks of a `2/pi` table.
+
+[OBS] Operand-fragment load: Chapters 15, 19, 20, and 24 use `LDG.E.CONSTANT` to fetch read-only tensor operand fragments directly into registers.
+
+[OBS] Metadata or scale load: Chapters 19 and 24 use `LDG.E.CONSTANT` values as sparse metadata or block-scale operands for tensor-core instructions.
+
+[OBS] Runtime layout/epilogue read: Chapter 25 uses `LDG.E.CONSTANT` for read-only global values that feed layout decoding, packing, STSM, or storeback preparation.
+
+**Interpretation**
+
+[INF] The reliable first-pass conclusion is memory-path classification: descriptor-addressed global load plus `.CONSTANT` read-only path.
+
+[INF] The consumer decides the semantic role. A later `IMAD.WIDE` accumulation loop points toward table-driven arithmetic; a later `QMMA.SP` metadata operand points toward sparse metadata; a later `OMMA.SF` scale operand points toward block-scaling data.
+
+[INF] `LDG.E.CONSTANT` should be kept separate from `LDC`/`LDCU`: `LDC` and `LDCU` read constant-memory banks such as launch parameters, while `LDG.E.CONSTANT` still uses the global descriptor-addressed form `desc[UR][R.64]`.
+
+[INF] Multiple scalar `LDG.E.CONSTANT` instructions with explicit offsets can be a compiler-selected scalarization of read-only vector or fragment data; vector width should not be assumed unless the SASS opcode carries a width suffix.
+
+[INF] A `const __restrict__` source pointer is a plausible producer in some controlled kernels, but future audits should cite the source signature or surrounding chapter evidence before claiming the qualifier caused the opcode.
+
+**Anti-patterns**
+
+[INF] Do not classify `LDG.E.CONSTANT` as ordinary vectorized global memory access unless the opcode also shows the relevant vector width form.
+
+[INF] Do not classify every `LDG.E.CONSTANT` as a trig table; tensor-core and epilogue probes use the same load path for other read-only data.
+
+[INF] Do not confuse `LDG.E.CONSTANT` with `LDC` or `LDCU` just because the word `CONSTANT` appears in the opcode.
+
+[INF] Do not infer source-level immutability or aliasing guarantees from the opcode alone.
+
+[INF] Do not treat `.CONSTANT` as proof that the data lives in CUDA `__constant__` memory; Chapter 11 explicitly leaves the table-base/global-memory split as an open clarification.
+
+**Open gaps**
+
+[GAP] Exact cache behavior and performance differences among `LDG.E`, `LDG.E.CONSTANT`, `.SYS`, and other modifiers are not profiled.
+
+[GAP] The source-level conditions that force or prevent `.CONSTANT` selection are not fully mapped.
+
+[GAP] The Chapter 11 split between `c[0x4]` table-base materialization and `LDG.E.CONSTANT` global table access remains partially unresolved.
+
+[GAP] Width selection for read-only fragment loads is not fully explained.
+
+[GAP] Cross-architecture stability of the `.CONSTANT` load path is not established.
+
+---
+
+### PATTERN-28: Global reduction epilogue with REDG
+
+**Category**: epilogue
+**Evidence**: [OBS] Chapter 24 contains a controlled SM120a production mini-GEMM probe, variant 24z, that emits `REDG.E.ADD.F32.FTZ.RN.STRONG.GPU` in a split-K or multi-CTA reduction stub.
+**Confidence**: [INF] C2 for recognizing the observed `REDG.E.ADD.F32...` global reduction form; C1 for labeling a future production kernel as split-K or multi-CTA without launch geometry, source, or inter-CTA accumulation context.
+
+**Plain English**
+
+[INF] A normal GEMM epilogue writes each final output element once with stores such as `STG.E.128`. A reduction epilogue is different: it adds a partial result into an existing global-memory destination, which is the shape needed when multiple CTAs or K-slices contribute to the same output.
+
+[INF] In the observed Chapter 24 stub, that global accumulation is visible as `REDG.E.ADD.F32.FTZ.RN.STRONG.GPU`. In plain English, the kernel is not just storing an output tile; it is reducing a partial value into global memory.
+
+[INF] Seeing `REDG.E.ADD...` is strong evidence for a global reduction writeback path. It does not by itself prove the full source-level split-K schedule, grid decomposition, numerical associativity, or final reduction ordering.
+
+**SASS signature**
+
+[OBS] Chapter 24 variant 24z emits `REDG.E.ADD.F32.FTZ.RN.STRONG.GPU desc[UR4][R2.64], R8`.
+
+[OBS] Chapter 24 records 24z as a split-K or multi-CTA reduction stub containing HMMA compute, the `REDG.E.ADD.F32...` reduction operation, and normal `STG.E.128` store traffic.
+
+[OBS] The observed `REDG` destination uses the same descriptor-addressed global-memory shape as other global operations: `desc[UR][R.64]`.
+
+[OBS] The observed source value is a register operand, `R8`, added into the global destination.
+
+**Variants**
+
+[OBS] Observed variant: F32 add reduction with `.FTZ.RN.STRONG.GPU` suffixes in 24z.
+
+[GAP] Integer, half, vector, min/max, scope, semantic-strength, and system-scope `REDG` variants are not covered by the current local evidence.
+
+[GAP] `UREDGR`, `USTGR`, and related newer reduction/writeback instructions remain watchlist items rather than established patterns in this file.
+
+**Interpretation**
+
+[INF] `REDG.E.ADD...` should be classified as a global reduction or atomic accumulation epilogue, not as a plain global store.
+
+[INF] In a production audit, `REDG` marks an epilogue region that may coexist with normal stores. The matcher should separate compute (`HMMA`/`QMMA`/`OMMA`), local storeback (`STSM`/`LDS`), plain output stores (`STG`), and global reductions (`REDG`) instead of collapsing them into one generic epilogue bucket.
+
+[INF] The `.ADD.F32` portion identifies the observed arithmetic operation and datatype. The remaining suffixes are part of the observed instruction spelling, but their precise encoding and full memory-model semantics are not decoded here.
+
+[INF] A source-level `atomicAdd` or split-K reduction stub is a plausible producer for this pattern in Chapter 24, but future dumps should be checked against source or launch context before making a whole-kernel split-K claim.
+
+**Anti-patterns**
+
+[INF] Do not count `REDG.E.ADD...` as a vectorized `STG.E.128` store.
+
+[INF] Do not infer split-K solely from HMMA plus STG; the reduction signal in the observed stub is the `REDG` writeback.
+
+[INF] Do not claim final numerical determinism, reduction order, or correctness from the SASS opcode alone.
+
+[INF] Do not generalize the observed F32 add form to all reduction datatypes or scopes.
+
+[INF] Do not merge this pattern with warp-level `REDUX`; `REDUX` reduces values within a warp, while `REDG` writes an accumulated value to global memory.
+
+**Open gaps**
+
+[GAP] REDG latency, scoreboard behavior, and memory-ordering effects are not measured.
+
+[GAP] Full suffix semantics for `.STRONG.GPU`, `.FTZ`, and `.RN` are not decoded beyond the observed spelling.
+
+[GAP] Non-F32 and non-ADD REDG variants are not locally established.
+
+[GAP] Interaction with CTA clusters, system scope, and newer UREDGR/UTC reduction instructions remains untested.
+
+[GAP] Production-library split-K examples beyond the controlled 24z stub remain to be audited.
+
+---
+
+### PATTERN-29: Cold error and trap path
+
+**Category**: control_flow
+**Evidence**: [OBS] Chapter 21 variant 21s observes `BPT.TRAP 0x1` behind a predicated branch with no `BSSY`/`BSYNC`; Chapter 24 variant 24ad observes `BSSY.RECONVERGENT`, `BSYNC.RECONVERGENT`, and `BPT.TRAP` around a production-like cold error/assert path.
+**Confidence**: [INF] C2 for recognizing observed `BPT.TRAP 0x1` cold/error-path structure; C1 for inferring source-level assert, runtime hotness, or error semantics without source and branch-condition context.
+
+**Plain English**
+
+[INF] A cold error path is code that exists in the binary but is expected to run only for exceptional conditions, such as an assert, explicit trap, defensive check, or impossible-state guard. In SASS, this can appear as a branch-protected region ending in `BPT.TRAP`.
+
+[INF] This pattern tells an auditor not to mistake defensive error code for the main compute loop. A production-like tensor-core kernel can contain a normal HMMA/epilogue pipeline and also carry a side path that traps if a rare condition is met.
+
+[INF] Seeing `BPT.TRAP` identifies a trap-capable path. It does not by itself prove the original source construct was `assert`, that the path is impossible, or that the trap can be ignored for correctness.
+
+**SASS signature**
+
+[OBS] Chapter 21 variant 21s emits `BPT.TRAP 0x1` behind a predicated forward branch.
+
+[OBS] Chapter 21 records 21s with 32 instructions, no `BSSY`, and no `BSYNC`.
+
+[OBS] Chapter 24 variant 24ad emits `BSSY.RECONVERGENT`, `BSYNC.RECONVERGENT`, and `BPT.TRAP` around a cold path.
+
+[OBS] Chapter 24 records 24ad as a cold error/assert path in a production mini-GEMM style probe that also contains normal tensor-core and store traffic.
+
+[OBS] Chapter 20 observes terminal self-trap `BRA` regions after `EXIT`; those are separate safety/padding structures and are not the same as an in-body `BPT.TRAP` cold path.
+
+**Variants**
+
+[OBS] Simple branch-protected trap: Chapter 21 21s uses a predicated forward branch and `BPT.TRAP 0x1` without explicit reconvergence markers.
+
+[OBS] Reconvergent cold path: Chapter 24 24ad places the trap path in a larger structure that includes `BSSY.RECONVERGENT` and `BSYNC.RECONVERGENT`.
+
+[OBS] Terminal safety trap: Chapter 20 observes a self-branch after `EXIT`.
+
+[INF] That form is a post-exit safety region and should be classified separately from executable cold error code.
+
+**Interpretation**
+
+[INF] In a region audit, `BPT.TRAP` should start a cold/error-path classification unless nearby control flow proves it belongs to the hot path.
+
+[INF] The branch condition and reconvergence context decide whether the trap is lane-divergent, warp-level, or structurally isolated. The opcode alone only proves the trap instruction exists.
+
+[INF] A `BPT.TRAP` path should be segmented before classifying mainloop compute, otherwise cold defensive code can make a small kernel look more branch-heavy than its hot path really is.
+
+[INF] The presence or absence of `BSSY`/`BSYNC` around a trap is source-shape and compiler-shape dependent in the observed chapters; both forms are valid evidence classes.
+
+**Anti-patterns**
+
+[INF] Do not count a post-`EXIT` self-trap `BRA` as a useful loop back-edge or cold assert body.
+
+[INF] Do not treat every predicated `EXIT` as a cold error path; predicated exits are also normal bounds and tail guards.
+
+[INF] Do not infer source-level `assert` solely from `BPT.TRAP`; source, comments, or controlled variant context are needed.
+
+[INF] Do not remove a trap path from correctness reasoning without understanding the predicate that reaches it.
+
+[INF] Do not let a cold trap region dominate the classification of the main tensor-core, copy, or epilogue regions.
+
+**Open gaps**
+
+[GAP] Exact `BPT.TRAP` encoding fields and immediate semantics are not decoded beyond the observed `0x1` form.
+
+[GAP] Runtime behavior, exception reporting, and debugger interaction are not characterized.
+
+[GAP] Source constructs beyond explicit inline `trap` and the controlled cold-path probe are not mapped.
+
+[GAP] Cross-architecture stability of `BPT.TRAP` lowering and reconvergence wrapping is not established.
+
+[GAP] Production-library cold error paths remain to be sampled beyond the Chapter 24 mini-GEMM probe.
 
 ---
 
@@ -3004,9 +5649,11 @@ During an attempt to audit a production fused FP4 attention kernel on SM120, sev
 * [INF] `knowledge/encoding/CONTROL_CODE.md` now records the partial SM120 / SM120a control-code field model. Resolved fields include QMMA dtype and MMA-chain bits, `DEPBAR.LE SB0, N` wait-group bits, reuse labels, denvdis scoreboard field names, and denvdis scheduling classes. Full stall/yield bit placement and the exact mapping between denvdis `cword` and the full local SASS control-code hex remain open.
 * [RES] The targeted denvdis gap pass cross-checks `QMMA.SF.SP`, `OMMA.SF.SP`, `WARPSYNC.ALL`, and `REDUX.SUM.S32` with `nvd -O -S -p` and `not_found 0`. These close the remaining denvdis-recognition gaps from the initial Phase 2.5 representative pass, while deeper bit-placement gaps remain scoped in `CONTROL_CODE.md`.
 
-### Decision: Phase 3 gated
+### Decision: Phase 3 complete
 
 * [RES] Required Phase 3 gates from Chapters 20, 21, and 22 are complete.
 * [RES] The strongly recommended Chapter 23, 24, and 25 structural chapters are complete for first-pass SASS coverage and runtime smoke execution.
 * [RES] The audit confidence framework is documented before Phase 3 pattern formalization.
-* [INF] Phase 3 patterns should carry confidence levels when promoted from chapter-local observations into reusable production-audit rules.
+* [RES] The initial Phase 3 pattern library is formalized in `patterns/` with 29 reusable production-audit signatures.
+* [RES] Each formal pattern carries confidence limits, plain-English meaning, SASS signatures, variants, anti-patterns, and open gaps.
+* [INF] Remaining open work belongs to later phases or explicit gaps: production-library audits, full runtime layout decode, full control-code bit placement, cross-architecture replay, and an eventual audit tool.

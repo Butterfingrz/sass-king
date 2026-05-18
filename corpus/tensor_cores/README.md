@@ -44,22 +44,22 @@ Not in scope on SM120 (architecturally unavailable):
 
 ## Phase 3 gate
 
-Phase 3 does not start until the SM120 audit prerequisites below are complete.
+Phase 3 is now complete at the initial pattern-library level. The SM120 audit prerequisites below were the gates that had to close before the reusable pattern pages could be formalized under `../../patterns/`.
 
-Required before Phase 3:
+Required gates:
 
 - [x] Chapter 20 - Control flow
 - [x] Chapter 21 - Divergence and reconvergence
 - [x] Chapter 22 - stmatrix / matrix store
 
-Strongly recommended before Phase 3:
+Strongly recommended gates:
 
 - [x] Chapter 23 - FP4 / FP6 fragment layout
 - [x] Chapter 24 - Production mini-GEMM audit
 - [x] Chapter 25 - STSM epilogue layout and storeback semantics
 - [x] Audit confidence framework - methodology checklist for qualifying production-kernel conclusions
 
-Deferred and non-blocking for Phase 3:
+Deferred beyond the initial Phase 3 library:
 
 - [ ] Sparse QMMA / OMMA latency once hardware runtime is available
 - [ ] Exact `.SP` bit placement in opcode/control fields
@@ -73,7 +73,7 @@ Kernels use inline PTX `asm volatile` rather than CUTLASS wrappers to minimize c
 
 ## Relationship with knowledge/
 
-Tensor core findings live in `../../knowledge/FINDINGS.md`, under dedicated `## Kernel <N>` sections. Reusable instruction-family facts live in `../../knowledge/SASS_INSTRUCTIONS_SM120.md` and `../../knowledge/encoding/`.
+Tensor core findings live in `../../knowledge/FINDINGS.md`, under dedicated `## Kernel <N>` sections. Reusable instruction-family facts live in `../../knowledge/SASS_INSTRUCTIONS_SM120.md` and `../../knowledge/encoding/README.md`.
 
 The per-chapter `conclusion{N}.md` files here document the narrative of the chapter (what we tried, in what order, what the deltas were). They complement but do not duplicate the global knowledge files.
 
@@ -95,7 +95,7 @@ The per-chapter `conclusion{N}.md` files here document the narrative of the chap
 | 24 | **SASS + runtime smoke done** | 24a-24ad (30) | LDGSTS, LDSM, HMMA/QMMA/OMMA, STSM, STG, REDG |
 | 25 | **SASS + runtime smoke done** | 25a-25z (26) | STSM.16.M88/MT88, STS.128, F2F.F16/BF16, MMA-to-STSM, STG |
 
-Chapters 13, 14, 16, 17, 18, and 19 decode the core tensor-core instruction families. Chapter 20 closes the first control-flow gate for loop lowering and back-edge detection. Chapter 21 closes the first divergence/reconvergence gate for the tested lane-divergent patterns. Chapter 22 closes the first matrix-store gate for m8n8 b16 STSM. Chapter 23 closes first-pass FP4/FP6 SASS coverage and runtime smoke execution for fragment-layout probes, with full lane-to-value decode still open. Chapter 24 closes first-pass production-like mini-GEMM SASS coverage and runtime smoke execution, but remains structural rather than a full numeric GEMM correctness suite. Chapter 25 closes first-pass STSM epilogue/storeback SASS coverage and runtime smoke execution. The audit confidence framework is now documented in `../../knowledge/FINDINGS.md`, so production-kernel conclusions can be qualified by evidence level before Phase 3 pattern formalization.
+Chapters 13, 14, 16, 17, 18, and 19 decode the core tensor-core instruction families. Chapter 20 closes the first control-flow gate for loop lowering and back-edge detection. Chapter 21 closes the first divergence/reconvergence gate for the tested lane-divergent patterns. Chapter 22 closes the first matrix-store gate for m8n8 b16 STSM. Chapter 23 closes first-pass FP4/FP6 SASS coverage and runtime smoke execution for fragment-layout probes, with full lane-to-value decode still open. Chapter 24 closes first-pass production-like mini-GEMM SASS coverage and runtime smoke execution, but remains structural rather than a full numeric GEMM correctness suite. Chapter 25 closes first-pass STSM epilogue/storeback SASS coverage and runtime smoke execution. The audit confidence framework is documented in `../../knowledge/FINDINGS.md`, and the reusable Phase 3 pattern pages now live under `../../patterns/`, so Phase 4 production-kernel conclusions can cite named patterns with explicit evidence levels.
 
 ## SM120 MMA opcode landscape (after chapter 19)
 

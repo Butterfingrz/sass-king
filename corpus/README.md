@@ -15,7 +15,7 @@ Each chapter is a controlled experiment: compile a small CUDA kernel, dump the g
 
 ## Reading Model
 
-Start from a section README, then open an individual chapter directory. The chapter-local `conclusion*.md` file explains the controlled variants and records the local narrative. Project-wide facts are promoted into [../knowledge/FINDINGS.md](../knowledge/FINDINGS.md), [../knowledge/SASS_INSTRUCTIONS_SM120.md](../knowledge/SASS_INSTRUCTIONS_SM120.md), and [../knowledge/encoding/](../knowledge/encoding/).
+Start from a section README, then open an individual chapter directory. The chapter-local `conclusion*.md` file explains the controlled variants and records the local narrative. Project-wide facts are promoted into [../knowledge/FINDINGS.md](../knowledge/FINDINGS.md), [../knowledge/SASS_INSTRUCTIONS_SM120.md](../knowledge/SASS_INSTRUCTIONS_SM120.md), and [../knowledge/encoding/README.md](../knowledge/encoding/README.md).
 
 ## Reproduction Model
 

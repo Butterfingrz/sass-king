@@ -11,6 +11,7 @@ Included in the v0.1 boundary:
 - controlled CUDA kernel corpus through chapters 01-25;
 - reorganized `corpus/` layout with section indexes;
 - project-wide `knowledge/FINDINGS.md` with navigation index and claim discipline;
+- initial Phase 3 pattern library with 29 reusable audit signatures under `patterns/`;
 - SM120 / SM120a instruction glossary;
 - pilot encoding pages for `LDSM`, `STSM`, `QMMA`, and partial control-code modeling;
 - denvdis integration notes and representative cross-validation results;
@@ -42,12 +43,16 @@ cuobjdump --dump-sass vector_add > sm_120.sass
 | Artifact | Purpose |
 |---|---|
 | `README.md` | Project overview, roadmap, and related work. |
+| `docs/README.md` | Documentation index. |
 | `docs/START_HERE.md` | Minimal onboarding path. |
+| `docs/PROJECT_STRUCTURE.md` | Repository navigation model and content ownership rules. |
 | `corpus/README.md` | Corpus section map and reproduction model. |
 | `knowledge/FINDINGS.md` | Primary source of truth for observations, hypotheses, resolutions, and gaps. |
 | `knowledge/SASS_INSTRUCTIONS_SM120.md` | Evidence-backed instruction-family inventory. |
-| `knowledge/encoding/` | Reusable instruction-family notes. |
+| `knowledge/encoding/README.md` | Index for reusable instruction-family notes. |
 | `knowledge/DENVDIS_INTEGRATION.md` | denvdis validation status and policy. |
+| `patterns/README.md` | Phase 3 pattern index for audit-facing SASS signatures. |
+| `production/README.md` | Phase 4 entry point for upcoming manual production audits. |
 
 ## Release checklist
 

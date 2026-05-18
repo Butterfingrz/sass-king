@@ -8,10 +8,13 @@ SASS King is a research corpus and knowledge base for NVIDIA SASS. It is not yet
 
 | Goal | Path |
 |---|---|
+| Pick the right documentation page | `docs/README.md` |
+| Understand the repository layout | `docs/PROJECT_STRUCTURE.md` -> `README.md` |
 | Learn the basic reading vocabulary | `corpus/basics/01_vector_add/` -> `corpus/basics/03_vector_fma/` -> `corpus/basics/06_shared_memory_scalar/` -> `corpus/basics/08_vectorized_load/` |
 | Understand warp-level primitives | `corpus/warp_collectives/09_warp_shuffling/` -> `corpus/warp_collectives/10_reduce/` |
 | Understand tensor-core evidence | `corpus/tensor_cores/13_hmma_fp16/` -> `corpus/tensor_cores/14_qmma_fp8/` -> `corpus/tensor_cores/17_ldmatrix/` -> `corpus/tensor_cores/18_pipelined_tile/` |
-| Understand the knowledge base | `knowledge/FINDINGS.md` -> `knowledge/SASS_INSTRUCTIONS_SM120.md` -> `knowledge/encoding/` |
+| Understand the knowledge base | `knowledge/FINDINGS.md` -> `knowledge/SASS_INSTRUCTIONS_SM120.md` -> `knowledge/encoding/README.md` |
+| Use reusable audit signatures | `patterns/README.md` -> one `patterns/NN-*.md` page -> matching evidence in `knowledge/FINDINGS.md` |
 
 ## Read one chapter
 
@@ -57,6 +60,12 @@ Toolchain and driver versions can change output. If your dump differs, treat the
 | `[GAP]` | Open question not answered by the current evidence. |
 
 Do not upgrade a claim to `[OBS]` because an external source says it. External sources can support an interpretation, but local dumps remain the primary evidence.
+
+## Use the pattern library
+
+Phase 3 is formalized in `patterns/`. Start from `patterns/README.md`, pick the closest `PATTERN-NN` page, and match the `SASS signature` and `Variants` sections before citing it in an audit.
+
+`knowledge/FINDINGS.md` remains the source of truth. The pattern pages are the shorter audit-facing view and should preserve the same confidence limits, anti-patterns, and open gaps.
 
 ## Add evidence from another architecture
 
